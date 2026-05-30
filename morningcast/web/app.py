@@ -10,10 +10,12 @@ from pathlib import Path
 from fastapi import FastAPI, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from ..config import AUDIO_DIR, FEED_DIR
-from ..db import get_episodes, get_topic, get_topics, init_db, save_topic
+from ..audio import KOKORO_VOICES
+from ..config import AUDIO_DIR, FEED_DIR, settings
+from ..db import get_episodes, get_setting, get_topic, get_topics, init_db, save_topic, set_setting
 from ..feed import build_feed
 from ..models import Topic, TopicSource, TopicStatus
+from ..script import STYLE_PRESETS
 
 app = FastAPI(title="MorningCast")
 
@@ -50,6 +52,22 @@ def reject(topic_id: str):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/settings")
+def update_settings(
+    style_preset: str = Form(...),
+    voice_a: str = Form(...),
+    voice_b: str = Form(...),
+):
+    if style_preset in STYLE_PRESETS:
+        set_setting("style_preset", style_preset)
+    valid_voices = {v for v, _ in KOKORO_VOICES}
+    if voice_a in valid_voices:
+        set_setting("voice_a", voice_a)
+    if voice_b in valid_voices:
+        set_setting("voice_b", voice_b)
+    return RedirectResponse("/", status_code=303)
+
+
 # --- static-ish serving ----------------------------------------------------
 
 @app.get("/audio/{name}")
@@ -70,6 +88,13 @@ def feed():
 
 # --- minimal UI ------------------------------------------------------------
 
+def _options(items: list[tuple[str, str]], selected: str) -> str:
+    return "".join(
+        f'<option value="{v}"{" selected" if v == selected else ""}>{label}</option>'
+        for v, label in items
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     suggested = get_topics(TopicStatus.SUGGESTED)
@@ -77,6 +102,13 @@ def home():
         TopicStatus.QUEUED, TopicStatus.RESEARCHING, TopicStatus.SCRIPTING,
         TopicStatus.GENERATING_AUDIO)]
     episodes = get_episodes()
+
+    style_opts = _options(
+        [(k, v["label"]) for k, v in STYLE_PRESETS.items()],
+        get_setting("style_preset", "dry_british"),
+    )
+    voice_a_opts = _options(KOKORO_VOICES, get_setting("voice_a", "bm_george"))
+    voice_b_opts = _options(KOKORO_VOICES, get_setting("voice_b", "bf_emma"))
 
     def topic_row(t: Topic, actions: str = "") -> str:
         note = f"<br><small>{t.notes}</small>" if t.notes else ""
@@ -115,6 +147,15 @@ button{{cursor:pointer}} input,textarea{{width:100%;padding:.4rem;margin:.2rem 0
   <input name="title" placeholder="Topic title" required>
   <textarea name="notes" placeholder="Optional steer / angle"></textarea>
   <button type="submit">Queue it</button>
+</form>
+
+<h2>Voice &amp; style</h2>
+<form method="post" action="/settings">
+  <label>Style: <select name="style_preset">{style_opts}</select></label>
+  <label>Host A ({settings.host_a_name}): <select name="voice_a">{voice_a_opts}</select></label>
+  <label>Host B ({settings.host_b_name}): <select name="voice_b">{voice_b_opts}</select></label>
+  <button type="submit">Save settings</button>
+  <small>Applies to the next episode you <em>produce</em>. Re-queue existing topics to re-render with new voices.</small>
 </form>
 
 <h2>Curated suggestions</h2><ul>{sug_html}</ul>

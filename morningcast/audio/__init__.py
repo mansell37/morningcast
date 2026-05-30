@@ -86,29 +86,64 @@ class StubAudio:
         return out_path
 
 
-class KokoroAudio:
-    """Free CPU-friendly TTS. Two voices for the two speakers.
+# Curated subset of Kokoro's English voices shown in the settings dropdown.
+# `b*` voices use British English (lang_code "b"), `a*` use American ("a").
+# Keep entries grouped by accent then gender for a tidy dropdown.
+KOKORO_VOICES: list[tuple[str, str]] = [
+    ("bm_george",   "George — British male"),
+    ("bm_lewis",    "Lewis — British male"),
+    ("bm_fable",    "Fable — British male (storyteller)"),
+    ("bm_daniel",   "Daniel — British male"),
+    ("bf_emma",     "Emma — British female"),
+    ("bf_isabella", "Isabella — British female"),
+    ("bf_alice",    "Alice — British female"),
+    ("bf_lily",     "Lily — British female"),
+    ("am_michael",  "Michael — American male"),
+    ("am_adam",     "Adam — American male"),
+    ("am_eric",     "Eric — American male"),
+    ("am_onyx",     "Onyx — American male (deep)"),
+    ("af_heart",    "Heart — American female (warm)"),
+    ("af_bella",    "Bella — American female"),
+    ("af_nicole",   "Nicole — American female"),
+    ("af_sky",      "Sky — American female"),
+]
 
-    Requires `pip install kokoro soundfile` and the model weights (auto-downloaded
-    on first run). See DECISIONS.md for the voice IDs chosen.
-    """
+
+def _voice_lang(voice_id: str) -> str:
+    """Kokoro requires a per-language pipeline. 'b*' = British, default American."""
+    return "b" if voice_id.startswith("b") else "a"
+
+
+class KokoroAudio:
+    """Free CPU-friendly TTS. Voices configurable via the web UI (app_settings)."""
 
     name = "kokoro"
 
-    VOICE_A = "af_heart"
-    VOICE_B = "am_michael"
+    DEFAULT_VOICE_A = "bm_george"
+    DEFAULT_VOICE_B = "bf_emma"
+
+    def __init__(self):
+        from ..db import get_setting
+        self.voice_a = get_setting("voice_a", self.DEFAULT_VOICE_A)
+        self.voice_b = get_setting("voice_b", self.DEFAULT_VOICE_B)
 
     def render(self, script: Script, out_path: Path) -> Path:
         import soundfile as sf  # noqa
         from kokoro import KPipeline
 
-        pipeline = KPipeline(lang_code="a")  # American English
+        # Kokoro pipelines are per-language; cache one per accent we touch.
+        pipelines: dict[str, "KPipeline"] = {}
+        def _pipe(lang: str) -> "KPipeline":
+            if lang not in pipelines:
+                pipelines[lang] = KPipeline(lang_code=lang)
+            return pipelines[lang]
+
         wavs: list[Path] = []
         for i, line in enumerate(script.lines):
-            voice = self.VOICE_A if line.speaker == "A" else self.VOICE_B
+            voice = self.voice_a if line.speaker == "A" else self.voice_b
             seg = out_path.parent / f"_seg_{i:03d}.wav"
             audio = None
-            for _, _, audio in pipeline(line.text, voice=voice):
+            for _, _, audio in _pipe(_voice_lang(voice))(line.text, voice=voice):
                 pass
             sf.write(str(seg), audio, 24000)
             wavs.append(seg)

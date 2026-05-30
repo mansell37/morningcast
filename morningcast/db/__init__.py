@@ -40,7 +40,18 @@ CREATE TABLE IF NOT EXISTS episodes (
     rating REAL,
     published_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# Defaults seeded on first init so the UI dropdowns show a sensible state.
+_SETTING_DEFAULTS = {
+    "style_preset": "dry_british",
+    "voice_a": "bm_george",
+    "voice_b": "bf_emma",
+}
 
 
 def _conn(path: Path = DB_PATH) -> sqlite3.Connection:
@@ -52,6 +63,25 @@ def _conn(path: Path = DB_PATH) -> sqlite3.Connection:
 def init_db(path: Path = DB_PATH) -> None:
     with _conn(path) as c:
         c.executescript(SCHEMA)
+        for k, v in _SETTING_DEFAULTS.items():
+            c.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?,?)", (k, v))
+
+
+# --- settings --------------------------------------------------------------
+
+def get_setting(key: str, default: str = "") -> str:
+    with _conn() as c:
+        r = c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
 
 
 # --- topics ----------------------------------------------------------------

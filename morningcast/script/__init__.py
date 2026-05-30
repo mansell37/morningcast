@@ -16,7 +16,7 @@ from ..config import settings
 from ..models import Briefing, Script, ScriptLine, Topic
 
 
-SYSTEM = (
+_SYSTEM_CASUAL = (
     "You are a scriptwriter for a short, smart morning-learning podcast with two "
     "hosts who clearly enjoy each other's company. Host A ({a}) is the curious "
     "guide who frames topics; Host B ({b}) digs into detail and pushes back. "
@@ -26,6 +26,47 @@ SYSTEM = (
     "Target about {minutes} minutes (~{words} words). Open with a quick hook, not "
     "\"welcome back\". Close with one memorable takeaway."
 )
+
+_SYSTEM_DRY_BRITISH = (
+    "You are a scriptwriter for a short, intelligent British-style podcast in the "
+    "spirit of The Rest Is Politics or More or Less. Two hosts, Host A ({a}) and "
+    "Host B ({b}), trade observations with dry, understated wit — deadpan asides, "
+    "occasional sharp turns of phrase, mild self-deprecation. They take the subject "
+    "seriously without taking themselves too seriously. Write natural spoken "
+    "dialogue with British rhythms: \"well\", \"rather\", \"to be fair\", \"hang on\", "
+    "\"the curious thing is\". Avoid Americanisms, exclamation points, and hard-sell "
+    "openings. Open with a wry observation or a counterintuitive fact, not \"welcome "
+    "back\". Target about {minutes} minutes (~{words} words). Close with a quietly "
+    "memorable line — no fanfare."
+)
+
+_SYSTEM_NPR = (
+    "You are a scriptwriter for a short, narrative-driven podcast in the style of "
+    "NPR's Planet Money or Throughline. Host A ({a}) is the guide who frames the "
+    "story; Host B ({b}) brings detail and the human angle. Use a clear narrative "
+    "arc — hook, tension, surprise, resolution. Warm and professional, "
+    "conversational but well-crafted. Vary cadence: short punchy lines, longer "
+    "thoughtful ones. Target about {minutes} minutes (~{words} words). Open with a "
+    "vivid moment or pointed question, not \"welcome back\". Close with a single "
+    "image or idea that lingers."
+)
+
+_SYSTEM_ENERGETIC = (
+    "You are a scriptwriter for an energetic morning-radio show. Two hosts, Host A "
+    "({a}) and Host B ({b}), bring high energy and rapid-fire banter. Lots of "
+    "reactions, interruptions, agreement chains, real laughter, callbacks within "
+    "the episode. Substantive content delivered with enthusiasm — not shouty, just "
+    "genuinely engaged. Target about {minutes} minutes (~{words} words). Open with "
+    "a bold claim or a \"you'll never believe this\" moment. Close with a "
+    "high-energy takeaway listeners can repeat to a friend."
+)
+
+STYLE_PRESETS: dict[str, dict] = {
+    "dry_british": {"label": "Dry British wit (deadpan, observational)", "system": _SYSTEM_DRY_BRITISH},
+    "casual":      {"label": "Smart but casual (two friends chatting)",  "system": _SYSTEM_CASUAL},
+    "npr":         {"label": "NPR / Planet Money (polished narrative)",   "system": _SYSTEM_NPR},
+    "energetic":   {"label": "Energetic morning radio (high energy)",     "system": _SYSTEM_ENERGETIC},
+}
 
 INSTRUCTION = (
     "Write the episode based on this briefing:\n\n<briefing>\n{briefing}\n</briefing>\n\n"
@@ -43,9 +84,13 @@ class ScriptWriter:
     def write(self, topic: Topic, briefing: Briefing) -> Script:
         from anthropic import Anthropic
 
+        from ..db import get_setting
+
         client = Anthropic(api_key=self.api_key)
         words = settings.target_minutes * 150  # ~150 spoken wpm
-        system = SYSTEM.format(
+        preset_key = get_setting("style_preset", "dry_british")
+        preset = STYLE_PRESETS.get(preset_key, STYLE_PRESETS["dry_british"])
+        system = preset["system"].format(
             a=settings.host_a_name,
             b=settings.host_b_name,
             minutes=settings.target_minutes,
