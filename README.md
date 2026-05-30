@@ -85,6 +85,40 @@ tests/               offline pipeline tests
 DECISIONS.md         ← review this
 ```
 
+## Deploy to Railway
+
+The repo ships with `Procfile`, `nixpacks.toml`, and `.python-version` so a
+push to GitHub deploys with no extra build config. Steps the first time:
+
+1. **Create the service** — Railway → New Project → Deploy from GitHub repo →
+   pick `mansell37/morningcast`. The first build installs Python 3.12,
+   ffmpeg, and the Python deps automatically.
+2. **Add a volume** — Service → Settings → Volumes → mount at `/app/data`.
+   Without this, the SQLite DB and audio files are wiped on every deploy.
+   1 GB is plenty to start.
+3. **Set environment variables** (Service → Variables):
+   - `ANTHROPIC_API_KEY` — required
+   - `XAI_API_KEY` — required if `MC_RESEARCH_BACKEND=grok+claude`
+   - `MC_RESEARCH_BACKEND` — `claude` (Claude only) or `grok+claude` (default)
+   - `MC_AUDIO_BACKEND` — start with `stub` to validate the deploy, then
+     switch to `kokoro` for real audio
+   - `MC_BASE_URL` — your service's public URL (e.g.
+     `https://morningcast-production.up.railway.app`); needed for RSS audio
+     links to resolve in podcast apps
+4. **Generate a public URL** — Service → Settings → Networking → Generate
+   Domain. Paste that URL back into `MC_BASE_URL` and redeploy.
+5. **First request** is slow on cold start (DB init + Kokoro weights if
+   enabled — ~300 MB one-time download). Subsequent requests are normal.
+
+**Scheduled production** (optional): instead of running `scripts/scheduler.py`
+as a long-lived process, use Railway's cron feature to run
+`python -m scripts.cli produce` on the schedule you want.
+
+**Auth warning**: the web UI is unauthenticated. The Railway URL is hard to
+guess, but if you share it with anyone (or if it leaks), they can queue
+topics and trigger Claude/Grok calls on your account. Add basic auth in
+front of FastAPI before sharing the URL.
+
 ## Cost note
 Grok 4.1 Fast research is cheap (~cents/episode) and xAI offers monthly free
 credits worth checking. TTS is free with Kokoro/Dia2. Realistically a few dollars
