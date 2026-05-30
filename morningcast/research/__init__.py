@@ -26,7 +26,7 @@ class Researcher(Protocol):
 
 
 class GrokResearcher:
-    """Uses xAI Grok with Live Search for current, X-native signal."""
+    """Uses xAI Grok with the Agent Tools API (web_search) for current signal."""
 
     name = "grok"
 
@@ -47,12 +47,12 @@ class GrokResearcher:
             "concrete details, figures, and named sources where possible. "
             "Output as structured notes, not prose."
         )
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            extra_body={"search_parameters": {"mode": "auto"}},  # Live Search
+            input=[{"role": "user", "content": prompt}],
+            tools=[{"type": "web_search"}],
         )
-        return resp.choices[0].message.content or ""
+        return resp.output_text or ""
 
 
 class ClaudeResearcher:

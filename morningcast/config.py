@@ -11,7 +11,7 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:  # dotenv is optional but recommended
     pass
 
@@ -35,7 +35,7 @@ class Settings:
 
     # Model strings are easy to change here as providers update them.
     claude_model: str = os.getenv("MC_CLAUDE_MODEL", "claude-opus-4-7")
-    grok_model: str = os.getenv("MC_GROK_MODEL", "grok-4-1-fast")  # cheap workhorse w/ Live Search
+    grok_model: str = os.getenv("MC_GROK_MODEL", "grok-4.3")  # current flagship; web_search via Agent Tools API
 
     # --- audio ---
     # Backend options: "dia2", "kokoro", "stub", "elevenlabs"
