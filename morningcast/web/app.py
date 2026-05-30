@@ -7,12 +7,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Form
+from fastapi import BackgroundTasks, FastAPI, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..audio import KOKORO_VOICES
 from ..config import AUDIO_DIR, FEED_DIR, settings
-from ..db import get_episodes, get_setting, get_topic, get_topics, init_db, save_topic, set_setting
+from ..db import (
+    delete_episodes_for_topic,
+    get_episodes,
+    get_setting,
+    get_topic,
+    get_topics,
+    init_db,
+    save_topic,
+    set_setting,
+)
 from ..feed import build_feed
 from ..models import Topic, TopicSource, TopicStatus
 from ..script import STYLE_PRESETS
@@ -49,6 +58,28 @@ def reject(topic_id: str):
     if t:
         t.status = TopicStatus.REJECTED
         save_topic(t)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/episodes/{episode_id}/rerender")
+def rerender(episode_id: str, background: BackgroundTasks):
+    """Re-queue an episode's topic and re-run the pipeline in the background.
+
+    The page redirects immediately; the user can refresh to watch the status
+    march through researching → scripting → generating_audio → published.
+    """
+    from ..pipeline import produce_episode
+
+    ep = next((e for e in get_episodes() if e.id == episode_id), None)
+    if not ep:
+        return RedirectResponse("/", status_code=303)
+    t = get_topic(ep.topic_id)
+    if not t:
+        return RedirectResponse("/", status_code=303)
+    delete_episodes_for_topic(t.id)
+    t.status = TopicStatus.QUEUED
+    save_topic(t)
+    background.add_task(produce_episode, t)
     return RedirectResponse("/", status_code=303)
 
 
@@ -129,7 +160,11 @@ def home():
 
     ep_html = "".join(
         f'<li><b>{e.title}</b> — {e.summary}<br>'
-        f'<audio controls src="/audio/{Path(e.audio_path).name}"></audio></li>'
+        f'<audio controls src="/audio/{Path(e.audio_path).name}"></audio>'
+        f'<form style="display:inline;margin-left:.5rem" method="post" '
+        f'action="/episodes/{e.id}/rerender">'
+        f'<button title="Re-run the pipeline with current voice/style settings">'
+        f'Re-render</button></form></li>'
         for e in episodes
     ) or "<li><em>No episodes yet.</em></li>"
 

@@ -149,6 +149,11 @@ def save_episode(ep: Episode) -> Episode:
     return ep
 
 
+def delete_episodes_for_topic(topic_id: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM episodes WHERE topic_id=?", (topic_id,))
+
+
 def get_episodes() -> list[Episode]:
     with _conn() as c:
         rows = c.execute("SELECT * FROM episodes ORDER BY published_at DESC").fetchall()
