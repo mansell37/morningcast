@@ -37,6 +37,10 @@ class Settings:
     claude_model: str = os.getenv("MC_CLAUDE_MODEL", "claude-opus-4-7")
     grok_model: str = os.getenv("MC_GROK_MODEL", "grok-4.3")  # current flagship; web_search via Agent Tools API
 
+    # Research pipeline: "grok+claude" (default, Grok live search → Claude synthesis)
+    # or "claude" (Claude alone, no live web; useful when xAI is unavailable).
+    research_backend: str = os.getenv("MC_RESEARCH_BACKEND", "grok+claude")
+
     # --- audio ---
     # Backend options: "dia2", "kokoro", "stub", "elevenlabs"
     audio_backend: str = os.getenv("MC_AUDIO_BACKEND", "kokoro")

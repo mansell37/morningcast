@@ -92,6 +92,36 @@ class ClaudeResearcher:
         sources = _extract_sources(text)
         return Briefing(topic_id=topic.id, markdown=text, sources=sources)
 
+    def research_only(self, topic: Topic) -> Briefing:
+        """Research + synthesise in one Claude call, no live search.
+
+        Used when MC_RESEARCH_BACKEND=claude. Claude draws on its training
+        knowledge; useful as a fallback when xAI is unavailable, but the
+        briefing won't reflect events after Claude's knowledge cutoff.
+        """
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=self.api_key)
+        prompt = (
+            f"You are preparing a briefing for a short two-host learning podcast on:\n"
+            f"'{topic.title}'.\n"
+            f"{('User steer: ' + topic.notes) if topic.notes else ''}\n\n"
+            "Research the topic drawing on your own knowledge, then produce a tight, "
+            "accurate briefing in Markdown. Requirements:\n"
+            "- Lead with why this matters, then the substance, then open questions.\n"
+            "- Be honest about uncertainty or where information may be dated.\n"
+            "- Keep it concise: enough for a ~6 minute conversation, not exhaustive.\n"
+            "- End with a 'Sources' section listing well-known references or background works.\n"
+        )
+        resp = client.messages.create(
+            model=self.model,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        sources = _extract_sources(text)
+        return Briefing(topic_id=topic.id, markdown=text, sources=sources)
+
 
 def _extract_sources(markdown: str) -> list[str]:
     sources: list[str] = []
@@ -117,5 +147,7 @@ class ResearchOrchestrator:
         self.synthesiser = synthesiser or ClaudeResearcher()
 
     def run(self, topic: Topic) -> Briefing:
+        if settings.research_backend == "claude":
+            return self.synthesiser.research_only(topic)
         raw = self.gatherer.gather(topic)
         return self.synthesiser.synthesise(topic, raw_material=raw)
