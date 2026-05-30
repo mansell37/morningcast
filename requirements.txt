@@ -1,0 +1,27 @@
+# --- core ---
+anthropic>=0.40.0
+openai>=1.40.0          # used for xAI Grok (OpenAI-compatible endpoint)
+python-dotenv>=1.0.0
+
+# --- web + scheduling ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9 # form posts in the web UI
+schedule>=1.2.0
+
+# --- audio (free backends) ---
+# Kokoro: CPU-friendly default. Dia2: best free dialogue (prefers GPU).
+# Install whichever backend you use; both are optional until then.
+soundfile>=0.12.1
+# kokoro>=0.7.0         # uncomment to use the Kokoro backend
+# (Dia2: install from Nari Labs repo per DECISIONS.md)
+
+# --- audio (paid, optional) ---
+# elevenlabs>=1.0.0     # uncomment to use the ElevenLabs backend
+
+# --- dev ---
+pytest>=8.0.0
+
+# NOTE: ffmpeg must be installed at the OS level (not pip):
+#   Ubuntu: sudo apt install ffmpeg
+#   macOS:  brew install ffmpeg
