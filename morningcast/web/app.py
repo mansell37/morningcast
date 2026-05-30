@@ -61,6 +61,20 @@ def reject(topic_id: str):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/topics/{topic_id}/produce")
+def produce(topic_id: str, background: BackgroundTasks):
+    """Run the pipeline for a single topic in the background."""
+    from ..pipeline import produce_episode
+
+    t = get_topic(topic_id)
+    if not t or t.status not in (TopicStatus.QUEUED, TopicStatus.FAILED, TopicStatus.SUGGESTED):
+        return RedirectResponse("/", status_code=303)
+    t.status = TopicStatus.QUEUED
+    save_topic(t)
+    background.add_task(produce_episode, t)
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/episodes/{episode_id}/rerender")
 def rerender(episode_id: str, background: BackgroundTasks):
     """Re-queue an episode's topic and re-run the pipeline in the background.
@@ -126,13 +140,30 @@ def _options(items: list[tuple[str, str]], selected: str) -> str:
     )
 
 
+# Stepper visualisation for the topic pipeline. Filled = done/in-progress,
+# empty = not yet. The "current" stage is the rightmost filled segment.
+_PROGRESS = {
+    TopicStatus.QUEUED:           ("queued",                "▱▱▱▱"),
+    TopicStatus.RESEARCHING:      ("researching",            "▰▱▱▱"),
+    TopicStatus.SCRIPTING:        ("scripting",             "▰▰▱▱"),
+    TopicStatus.GENERATING_AUDIO: ("generating audio",       "▰▰▰▱"),
+    TopicStatus.PUBLISHED:        ("published",              "▰▰▰▰"),
+    TopicStatus.FAILED:           ("failed",                 "✕"),
+    TopicStatus.REJECTED:         ("rejected",               ""),
+    TopicStatus.SUGGESTED:        ("suggested",              ""),
+}
+_IN_FLIGHT = {TopicStatus.RESEARCHING, TopicStatus.SCRIPTING, TopicStatus.GENERATING_AUDIO}
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    suggested = get_topics(TopicStatus.SUGGESTED)
-    queued = [t for t in get_topics() if t.status in (
+    all_topics = get_topics()
+    suggested = [t for t in all_topics if t.status == TopicStatus.SUGGESTED]
+    queued = [t for t in all_topics if t.status in (
         TopicStatus.QUEUED, TopicStatus.RESEARCHING, TopicStatus.SCRIPTING,
-        TopicStatus.GENERATING_AUDIO)]
+        TopicStatus.GENERATING_AUDIO, TopicStatus.FAILED)]
     episodes = get_episodes()
+    any_in_flight = any(t.status in _IN_FLIGHT for t in all_topics)
 
     style_opts = _options(
         [(k, v["label"]) for k, v in STYLE_PRESETS.items()],
@@ -141,9 +172,24 @@ def home():
     voice_a_opts = _options(KOKORO_VOICES, get_setting("voice_a", "bm_george"))
     voice_b_opts = _options(KOKORO_VOICES, get_setting("voice_b", "bf_emma"))
 
-    def topic_row(t: Topic, actions: str = "") -> str:
+    def topic_row(t: Topic, actions: str | None = None) -> str:
+        label, bar = _PROGRESS.get(t.status, (t.status.value, ""))
+        progress = f' <span class="bar">{bar}</span>' if bar else ""
         note = f"<br><small>{t.notes}</small>" if t.notes else ""
-        return f"<li><b>{t.title}</b> <em>({t.status.value})</em>{note} {actions}</li>"
+        if actions is None:
+            if t.status == TopicStatus.QUEUED:
+                actions = (
+                    f'<form style="display:inline" method="post" action="/topics/{t.id}/produce">'
+                    f'<button>Produce now</button></form>'
+                )
+            elif t.status == TopicStatus.FAILED:
+                actions = (
+                    f'<form style="display:inline" method="post" action="/topics/{t.id}/produce">'
+                    f'<button>Retry</button></form>'
+                )
+            else:
+                actions = ""
+        return f'<li><b>{t.title}</b> <em>({label}{progress})</em>{note} {actions}</li>'
 
     sug_html = "".join(
         topic_row(
@@ -168,14 +214,25 @@ def home():
         for e in episodes
     ) or "<li><em>No episodes yet.</em></li>"
 
+    refresh = '<meta http-equiv="refresh" content="5">' if any_in_flight else ''
+    in_flight_banner = (
+        '<p style="background:#fff8d8;padding:.5rem .8rem;border-left:3px solid #d4a017;'
+        'border-radius:3px"><b>Episode in progress.</b> This page auto-refreshes every 5s '
+        'while work is running.</p>'
+        if any_in_flight else ''
+    )
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
+{refresh}
 <title>MorningCast</title>
 <style>body{{font-family:system-ui;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5}}
 h1{{margin-bottom:0}} ul{{padding-left:1rem}} li{{margin:.6rem 0}}
-button{{cursor:pointer}} input,textarea{{width:100%;padding:.4rem;margin:.2rem 0}}</style>
+button{{cursor:pointer}} input,textarea{{width:100%;padding:.4rem;margin:.2rem 0}}
+.bar{{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:1px;color:#0a7}}</style>
 </head><body>
 <h1>☕ MorningCast</h1>
 <p>Subscribe in your podcast app: <code>/feed.xml</code></p>
+{in_flight_banner}
 
 <h2>Add a topic</h2>
 <form method="post" action="/topics">
