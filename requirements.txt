@@ -9,22 +9,19 @@ uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9 # form posts in the web UI
 schedule>=1.2.0
 
-# --- audio (free backends) ---
-# Kokoro: CPU-friendly default. Dia2: best free dialogue (prefers GPU).
-# Install whichever backend you use; both are optional until then.
+# --- audio ---
+# Kokoro: free CPU-friendly TTS; the default audio backend.
+# imageio-ffmpeg: bundled ffmpeg binary so deploys don't depend on apt/nix/
+#   winget. ~30 MB; provides ffmpeg via imageio_ffmpeg.get_ffmpeg_exe().
+# soundfile: WAV I/O.
+# Together these pull in torch + transformers (~2 GB), making images big.
 soundfile>=0.12.1
-# Bundled ffmpeg binary so deploys don't depend on apt/nix/winget being
-# willing to install it. ~30 MB; provides ffmpeg via imageio_ffmpeg.get_ffmpeg_exe().
 imageio-ffmpeg>=0.5.0
-# kokoro>=0.7.0         # uncomment to use the Kokoro backend
-# (Dia2: install from Nari Labs repo per DECISIONS.md)
+kokoro>=0.7.0
 
-# --- audio (paid, optional) ---
-# elevenlabs>=1.0.0     # uncomment to use the ElevenLabs backend
+# --- audio (optional backends, not required) ---
+# elevenlabs>=1.0.0     # uncomment to use the paid ElevenLabs backend
+# (Dia2: install from Nari Labs repo per DECISIONS.md; needs a GPU)
 
 # --- dev ---
 pytest>=8.0.0
-
-# NOTE: ffmpeg must be installed at the OS level (not pip):
-#   Ubuntu: sudo apt install ffmpeg
-#   macOS:  brew install ffmpeg
