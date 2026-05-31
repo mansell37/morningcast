@@ -47,8 +47,8 @@ class Settings:
     elevenlabs_api_key: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
 
     # --- podcast feed metadata ---
-    feed_title: str = os.getenv("MC_FEED_TITLE", "MorningCast")
-    feed_author: str = os.getenv("MC_FEED_AUTHOR", "MorningCast")
+    feed_title: str = os.getenv("MC_FEED_TITLE", "CoffeeCast")
+    feed_author: str = os.getenv("MC_FEED_AUTHOR", "CoffeeCast")
     feed_description: str = os.getenv(
         "MC_FEED_DESCRIPTION", "Concise, AI-curated morning learning podcasts."
     )

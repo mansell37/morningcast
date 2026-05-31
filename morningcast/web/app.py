@@ -1,4 +1,4 @@
-"""FastAPI app for MorningCast.
+"""FastAPI app for CoffeeCast.
 
 Coffee-themed, mobile-responsive UI. Server-rendered HTML, zero JavaScript.
 Adds topics, runs the pipeline, lets you organise the resulting library.
@@ -31,7 +31,7 @@ from ..feed import build_feed
 from ..models import Episode, Topic, TopicSource, TopicStatus
 from ..script import STYLE_PRESETS
 
-app = FastAPI(title="MorningCast")
+app = FastAPI(title="CoffeeCast")
 
 
 @app.on_event("startup")
@@ -372,12 +372,12 @@ def home(tag: str = "", sort: str = "newest"):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {refresh}
-<title>MorningCast</title>
+<title>CoffeeCast</title>
 <style>{_CSS}</style>
 </head><body>
 <header class="masthead">
   <div class="masthead-inner">
-    <h1>☕ MorningCast</h1>
+    <h1>☕ CoffeeCast</h1>
     <p class="tagline">Concise, AI-curated morning podcasts.</p>
   </div>
 </header>
