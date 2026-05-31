@@ -1,6 +1,8 @@
 """FastAPI app for CoffeeCast.
 
-Coffee-themed, mobile-responsive UI. Server-rendered HTML, zero JavaScript.
+Coffee-themed, mobile-responsive UI. Server-rendered HTML with a sprinkle of
+JavaScript that polls /status and reloads only when something changes (and
+never mid-type), so adding topics isn't interrupted by a refresh timer.
 Adds topics, runs the pipeline, lets you organise the resulting library.
 
 Run with: uvicorn morningcast.web.app:app --reload
@@ -196,6 +198,27 @@ _PROGRESS = {
 _IN_FLIGHT = {TopicStatus.RESEARCHING, TopicStatus.SCRIPTING, TopicStatus.GENERATING_AUDIO}
 
 
+def _status_fingerprint(topics: list[Topic], episodes: list[Episode]) -> str:
+    """A cheap signature of everything the page cares about.
+
+    Changes when a topic advances (researching -> scripting -> audio), when a
+    job finishes/fails, or when a new episode (i.e. new audio) appears. The
+    client polls this and only reloads when it changes, so typing isn't
+    interrupted every few seconds.
+    """
+    parts = sorted(f"{t.id}:{t.status.value}" for t in topics)
+    return f"{len(episodes)}|" + "|".join(parts)
+
+
+@app.get("/status")
+def status_json():
+    topics = get_topics()
+    return {
+        "in_flight": any(t.status in _IN_FLIGHT for t in topics),
+        "fingerprint": _status_fingerprint(topics, get_episodes()),
+    }
+
+
 def _fmt_duration(seconds: int) -> str:
     if not seconds:
         return ""
@@ -385,10 +408,21 @@ def home(tag: str = "", sort: str = "newest"):
     )
 
     # --- banners ---
-    refresh = '<meta http-equiv="refresh" content="5">' if any_in_flight else ''
+    # No more <meta refresh> hammering the page every 5s (it nuked half-typed
+    # topics). Instead a tiny poller checks /status and only reloads when
+    # something actually changes — and never while you're mid-type. Plus a
+    # manual "Refresh now" button for the impatient.
+    fingerprint = _status_fingerprint(all_topics, all_episodes)
+    refresh = (
+        f'<script>window.__cc_fingerprint={fingerprint!r};'
+        f'window.__cc_in_flight={"true" if any_in_flight else "false"};</script>'
+        if any_in_flight else ''
+    )
     in_flight_banner = (
-        '<div class="banner banner-warn"><b>Episode in progress.</b> This page '
-        'auto-refreshes every 5s while work is running.</div>'
+        '<div class="banner banner-warn"><b>Episode in progress.</b> '
+        'This page refreshes itself when new audio is ready — type away. '
+        '<button type="button" class="btn-ghost" onclick="location.reload()">'
+        'Refresh now</button></div>'
         if any_in_flight else ''
     )
 
@@ -466,6 +500,27 @@ def home(tag: str = "", sort: str = "newest"):
     <p>Subscribe in your podcast app: <a href="/feed.xml"><code>/feed.xml</code></a></p>
   </footer>
 </main>
+<script>
+(function () {{
+  if (!window.__cc_in_flight) return;          // nothing running, nothing to poll
+  var baseline = window.__cc_fingerprint;
+  function busyTyping() {{
+    var el = document.activeElement;
+    return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")
+           && (el.value || "").trim() !== "";
+  }}
+  async function poll() {{
+    try {{
+      var r = await fetch("/status", {{cache: "no-store"}});
+      var s = await r.json();
+      if (s.fingerprint !== baseline && !busyTyping()) {{
+        location.reload();                       // new audio / status change -> refresh
+      }}
+    }} catch (e) {{ /* transient network blip, try again next tick */ }}
+  }}
+  setInterval(poll, 5000);
+}})();
+</script>
 </body></html>"""
 
 
