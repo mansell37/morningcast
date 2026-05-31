@@ -7,6 +7,8 @@ data/audio/*.wav
 data/feeds/*.xml
 data/db/*.sqlite3
 data/db/*.sqlite3-*
+data/morningcast.log*
+data/audio/_seg_*.wav
 
 # python
 __pycache__/

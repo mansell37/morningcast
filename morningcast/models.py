@@ -37,6 +37,7 @@ class Topic:
     source: TopicSource = TopicSource.USER
     status: TopicStatus = TopicStatus.QUEUED
     notes: str = ""                       # optional user steer / curation rationale
+    last_error: str = ""                  # set when status == FAILED, surfaced in UI
     id: str = field(default_factory=_new_id)
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)

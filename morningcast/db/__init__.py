@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS topics (
     source TEXT NOT NULL,
     status TEXT NOT NULL,
     notes TEXT DEFAULT '',
+    last_error TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -63,6 +64,10 @@ def _conn(path: Path = DB_PATH) -> sqlite3.Connection:
 def init_db(path: Path = DB_PATH) -> None:
     with _conn(path) as c:
         c.executescript(SCHEMA)
+        # Backward-compat: add columns introduced after the initial release.
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(topics)").fetchall()}
+        if "last_error" not in cols:
+            c.execute("ALTER TABLE topics ADD COLUMN last_error TEXT DEFAULT ''")
         for k, v in _SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?,?)", (k, v))
 
@@ -90,14 +95,14 @@ def save_topic(topic: Topic) -> Topic:
     topic.updated_at = datetime.now(timezone.utc)
     with _conn() as c:
         c.execute(
-            """INSERT INTO topics (id, title, source, status, notes, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?)
+            """INSERT INTO topics (id, title, source, status, notes, last_error, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, source=excluded.source, status=excluded.status,
-                 notes=excluded.notes, updated_at=excluded.updated_at""",
+                 notes=excluded.notes, last_error=excluded.last_error, updated_at=excluded.updated_at""",
             (
                 topic.id, topic.title, topic.source.value, topic.status.value,
-                topic.notes, topic.created_at.isoformat(), topic.updated_at.isoformat(),
+                topic.notes, topic.last_error, topic.created_at.isoformat(), topic.updated_at.isoformat(),
             ),
         )
     return topic
@@ -122,9 +127,15 @@ def get_topic(topic_id: str) -> Topic | None:
 
 
 def _row_to_topic(r: sqlite3.Row) -> Topic:
+    # last_error column may be absent on very old DBs even after migration runs;
+    # tolerate it.
+    try:
+        last_error = r["last_error"] or ""
+    except (IndexError, KeyError):
+        last_error = ""
     return Topic(
         id=r["id"], title=r["title"], source=TopicSource(r["source"]),
-        status=TopicStatus(r["status"]), notes=r["notes"],
+        status=TopicStatus(r["status"]), notes=r["notes"], last_error=last_error,
         created_at=datetime.fromisoformat(r["created_at"]),
         updated_at=datetime.fromisoformat(r["updated_at"]),
     )

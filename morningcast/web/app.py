@@ -176,6 +176,11 @@ def home():
         label, bar = _PROGRESS.get(t.status, (t.status.value, ""))
         progress = f' <span class="bar">{bar}</span>' if bar else ""
         note = f"<br><small>{t.notes}</small>" if t.notes else ""
+        err = (
+            f'<br><small style="color:#a00"><b>Error:</b> {t.last_error}</small>'
+            if t.status == TopicStatus.FAILED and t.last_error else ""
+        )
+        note = note + err
         if actions is None:
             if t.status == TopicStatus.QUEUED:
                 actions = (

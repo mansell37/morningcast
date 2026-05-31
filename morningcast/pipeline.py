@@ -6,10 +6,12 @@ run leaves a clear trail. This is the single entry point a scheduler calls.
 from __future__ import annotations
 
 import logging
+import traceback
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from .audio import get_audio_generator
-from .config import AUDIO_DIR, settings
+from .config import AUDIO_DIR, DATA_DIR, settings
 from .db import save_episode, save_topic
 from .feed import build_feed
 from .models import Episode, Topic, TopicStatus
@@ -17,6 +19,28 @@ from .research import ResearchOrchestrator
 from .script import ScriptWriter
 
 log = logging.getLogger("morningcast.pipeline")
+
+
+def _ensure_file_handler() -> None:
+    """Attach a rotating file handler to the morningcast logger once.
+
+    Failures inside background tasks otherwise vanish into uvicorn's stderr,
+    which can be invisible depending on how the server was launched. The log
+    file gives us a permanent record we can grep.
+    """
+    root = logging.getLogger("morningcast")
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+    root.setLevel(logging.INFO)
+    log_path = DATA_DIR / "morningcast.log"
+    handler = RotatingFileHandler(log_path, maxBytes=512_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    ))
+    root.addHandler(handler)
+
+
+_ensure_file_handler()
 
 
 def _estimate_duration(words: int) -> int:
@@ -59,10 +83,15 @@ def produce_episode(topic: Topic) -> Episode:
         log.info("Published '%s' and rebuilt feed", episode.title)
         return episode
 
-    except Exception:
+    except Exception as exc:
         topic.status = TopicStatus.FAILED
+        # Compact one-line summary for the UI; full traceback goes to the log.
+        topic.last_error = f"{type(exc).__name__}: {exc}"[:500]
         save_topic(topic)
-        log.exception("Pipeline failed for topic '%s'", topic.title)
+        log.error(
+            "Pipeline failed for topic '%s' (%s)\n%s",
+            topic.title, topic.last_error, traceback.format_exc(),
+        )
         raise
 
 
