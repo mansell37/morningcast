@@ -26,14 +26,24 @@ from ..models import Script
 
 
 def _find_ffmpeg() -> str:
-    """Locate the ffmpeg binary in a way that survives stale PATHs.
+    """Locate the ffmpeg binary in a way that works on any deploy target.
 
-    On Windows the winget-installed ffmpeg lives outside the default PATH a
-    process inherits unless the shell was reopened after install. On Railway
-    the nixpacks-installed ffmpeg is on PATH. We check shutil.which first,
-    then fall back to known install locations, then to the literal 'ffmpeg'
-    so the error message still points at the real problem.
+    Preference order:
+      1. imageio-ffmpeg's bundled binary - works identically on Windows,
+         macOS, and Linux without any system package install. This is the
+         canonical source we expect to use.
+      2. shutil.which("ffmpeg") - honours PATH if a system ffmpeg is present
+         and on PATH (e.g. winget on Windows, apt/nix on Linux).
+      3. Known install locations on each platform.
+      4. The literal 'ffmpeg' so the resulting FileNotFoundError still points
+         at the real problem if everything above failed.
     """
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
     found = shutil.which("ffmpeg")
     if found:
         return found
