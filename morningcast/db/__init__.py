@@ -201,6 +201,16 @@ def delete_episodes_for_topic(topic_id: str) -> None:
         c.execute("DELETE FROM episodes WHERE topic_id=?", (topic_id,))
 
 
+def delete_episode(episode_id: str) -> str | None:
+    """Remove an episode row. Returns the audio path so callers can unlink the file."""
+    with _conn() as c:
+        r = c.execute("SELECT audio_path FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        if not r:
+            return None
+        c.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
+        return r["audio_path"]
+
+
 def _row_to_episode(r: sqlite3.Row) -> Episode:
     # Tolerate older DBs that don't yet have the tags / audio_backend columns.
     try:

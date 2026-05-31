@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from ..audio import KOKORO_VOICES
 from ..config import AUDIO_DIR, FEED_DIR, settings
 from ..db import (
+    delete_episode,
     delete_episodes_for_topic,
     get_episode,
     get_episodes,
@@ -95,6 +96,23 @@ def rerender(episode_id: str, background: BackgroundTasks):
     t.status = TopicStatus.QUEUED
     save_topic(t)
     background.add_task(produce_episode, t)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/episodes/{episode_id}/delete")
+def delete_episode_route(episode_id: str):
+    """Delete an episode: removes the DB row, the audio file, and rebuilds the feed.
+
+    Leaves the underlying topic alone so the user can re-queue it later if they
+    change their mind.
+    """
+    audio_path = delete_episode(episode_id)
+    if audio_path:
+        try:
+            Path(audio_path).unlink(missing_ok=True)
+        except OSError:
+            pass  # file gone or locked; the row is already removed which is what matters
+        build_feed()
     return RedirectResponse("/", status_code=303)
 
 
@@ -330,11 +348,17 @@ def home(tag: str = "", sort: str = "newest"):
               </label>
               <div class="form-actions">
                 <button class="btn-primary" type="submit">Save</button>
-                <form method="post" action="/episodes/{e.id}/rerender" style="display:inline">
-                  <button class="btn-ghost" type="submit">Re-render</button>
-                </form>
               </div>
             </form>
+            <div class="edit-side-actions">
+              <form method="post" action="/episodes/{e.id}/rerender">
+                <button class="btn-ghost" type="submit">Re-render</button>
+              </form>
+              <form method="post" action="/episodes/{e.id}/delete"
+                    onsubmit="return confirm('Delete &quot;{html.escape(e.title)}&quot;? The mp3 will be removed too. The original topic stays so you can re-queue it later.');">
+                <button class="btn-danger" type="submit">Delete episode</button>
+              </form>
+            </div>
           </details>
         </article>
         """
@@ -568,6 +592,12 @@ button, .btn-primary, .btn-ghost {
   display: inline-block;
 }
 .btn-ghost:hover { background: var(--bg-accent); color: var(--accent-hi); text-decoration: none; }
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--border);
+}
+.btn-danger:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 
 .form-actions {
   display: flex;
@@ -664,6 +694,15 @@ button, .btn-primary, .btn-ghost {
 .ep-edit summary::before { content: "▸ "; }
 .ep-edit[open] summary::before { content: "▾ "; }
 .edit-form { margin-top: 0.6rem; }
+.edit-side-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.8rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed var(--border);
+}
+.edit-side-actions form { margin: 0; }
 
 /* filter bar */
 .filter-bar {
