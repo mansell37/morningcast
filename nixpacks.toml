@@ -1,12 +1,14 @@
 # Railway / Nixpacks build config for MorningCast.
 #
-# - Installs ffmpeg at build time (the audio layer shells out to it).
-# - Pins Python 3.12 because kokoro -> spacy -> curated-tokenizers has no
-#   pre-built wheel for 3.13 on Linux as of 2026-05 and would otherwise try
-#   to compile from source.
+# - Adds ffmpeg via nixPkgs (the audio layer shells out to it).
+#   The ".." token tells Nixpacks "keep the default packages and add these" -
+#   without it we'd wipe out the Python provider's own nixPkgs (incl. Python).
+# - Pins Python 3.12 (via .python-version) because kokoro -> spacy ->
+#   curated-tokenizers has no pre-built wheel for 3.13 on Linux as of 2026-05
+#   and would otherwise try to compile from source.
 
 [phases.setup]
-aptPkgs = ["ffmpeg"]
+nixPkgs = ["..", "ffmpeg"]
 
 [phases.install]
 # nixpacks runs `pip install -r requirements.txt` by default; nothing extra needed.

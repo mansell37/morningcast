@@ -14,6 +14,8 @@ added behind this same interface if an API ever appears.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import wave
 from pathlib import Path
@@ -21,6 +23,38 @@ from typing import Protocol, runtime_checkable
 
 from ..config import settings
 from ..models import Script
+
+
+def _find_ffmpeg() -> str:
+    """Locate the ffmpeg binary in a way that survives stale PATHs.
+
+    On Windows the winget-installed ffmpeg lives outside the default PATH a
+    process inherits unless the shell was reopened after install. On Railway
+    the nixpacks-installed ffmpeg is on PATH. We check shutil.which first,
+    then fall back to known install locations, then to the literal 'ffmpeg'
+    so the error message still points at the real problem.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    fallbacks = [
+        # Windows winget install
+        os.path.expandvars(
+            r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
+            r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+            r"\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"
+        ),
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
+    for p in fallbacks:
+        if p and Path(p).exists():
+            return p
+    return "ffmpeg"
+
+
+_FFMPEG = _find_ffmpeg()
 
 
 @runtime_checkable
@@ -42,7 +76,7 @@ def _concat_wavs_to_mp3(wav_paths: list[Path], out_path: Path) -> Path:
     """
     list_file = out_path.with_suffix(".txt")
     list_file.write_text("".join(f"file '{p.as_posix()}'\n" for p in wav_paths))
-    base = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+    base = [_FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
     normalised = base + [
         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-codec:a", "libmp3lame", "-q:a", "4", str(out_path),
