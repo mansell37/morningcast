@@ -73,6 +73,7 @@ def produce_episode(topic: Topic) -> Episode:
             summary=script.summary,
             audio_path=str(out_path),
             duration_seconds=_estimate_duration(script.word_count()),
+            audio_backend=generator.name,
         )
         save_episode(episode)
 

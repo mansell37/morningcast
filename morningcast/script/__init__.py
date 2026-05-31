@@ -87,13 +87,18 @@ class ScriptWriter:
         from ..db import get_setting
 
         client = Anthropic(api_key=self.api_key)
-        words = settings.target_minutes * 150  # ~150 spoken wpm
+        # Length comes from the UI (app_settings); falls back to the env var.
+        try:
+            target_minutes = int(get_setting("target_minutes", str(settings.target_minutes)))
+        except (TypeError, ValueError):
+            target_minutes = settings.target_minutes
+        words = target_minutes * 150  # ~150 spoken wpm
         preset_key = get_setting("style_preset", "dry_british")
         preset = STYLE_PRESETS.get(preset_key, STYLE_PRESETS["dry_british"])
         system = preset["system"].format(
             a=settings.host_a_name,
             b=settings.host_b_name,
-            minutes=settings.target_minutes,
+            minutes=target_minutes,
             words=words,
         )
         resp = client.messages.create(

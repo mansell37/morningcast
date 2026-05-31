@@ -1,10 +1,13 @@
-"""Thin FastAPI app: add topics, view queue, approve/reject suggestions, listen.
+"""FastAPI app for MorningCast.
 
-Also serves the audio files and the RSS feed so a podcast app can subscribe.
+Coffee-themed, mobile-responsive UI. Server-rendered HTML, zero JavaScript.
+Adds topics, runs the pipeline, lets you organise the resulting library.
+
 Run with: uvicorn morningcast.web.app:app --reload
 """
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Form
@@ -14,6 +17,7 @@ from ..audio import KOKORO_VOICES
 from ..config import AUDIO_DIR, FEED_DIR, settings
 from ..db import (
     delete_episodes_for_topic,
+    get_episode,
     get_episodes,
     get_setting,
     get_topic,
@@ -21,9 +25,10 @@ from ..db import (
     init_db,
     save_topic,
     set_setting,
+    update_episode_meta,
 )
 from ..feed import build_feed
-from ..models import Topic, TopicSource, TopicStatus
+from ..models import Episode, Topic, TopicSource, TopicStatus
 from ..script import STYLE_PRESETS
 
 app = FastAPI(title="MorningCast")
@@ -77,14 +82,10 @@ def produce(topic_id: str, background: BackgroundTasks):
 
 @app.post("/episodes/{episode_id}/rerender")
 def rerender(episode_id: str, background: BackgroundTasks):
-    """Re-queue an episode's topic and re-run the pipeline in the background.
-
-    The page redirects immediately; the user can refresh to watch the status
-    march through researching → scripting → generating_audio → published.
-    """
+    """Re-queue an episode's topic and re-run the pipeline in the background."""
     from ..pipeline import produce_episode
 
-    ep = next((e for e in get_episodes() if e.id == episode_id), None)
+    ep = get_episode(episode_id)
     if not ep:
         return RedirectResponse("/", status_code=303)
     t = get_topic(ep.topic_id)
@@ -97,11 +98,32 @@ def rerender(episode_id: str, background: BackgroundTasks):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/episodes/{episode_id}/edit")
+def edit_episode(
+    episode_id: str,
+    tags: str = Form(""),
+    rating: str = Form(""),
+):
+    """Update tags and rating for an episode (the user-curated metadata)."""
+    parsed_rating: float | None = None
+    if rating.strip():
+        try:
+            parsed_rating = float(rating)
+            if not (1.0 <= parsed_rating <= 5.0):
+                parsed_rating = None
+        except ValueError:
+            parsed_rating = None
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    update_episode_meta(episode_id, tag_list, parsed_rating)
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/settings")
 def update_settings(
     style_preset: str = Form(...),
     voice_a: str = Form(...),
     voice_b: str = Form(...),
+    target_minutes: str = Form("5"),
 ):
     if style_preset in STYLE_PRESETS:
         set_setting("style_preset", style_preset)
@@ -110,6 +132,8 @@ def update_settings(
         set_setting("voice_a", voice_a)
     if voice_b in valid_voices:
         set_setting("voice_b", voice_b)
+    if target_minutes in {"2", "5", "10"}:
+        set_setting("target_minutes", target_minutes)
     return RedirectResponse("/", status_code=303)
 
 
@@ -131,17 +155,16 @@ def feed():
     return FileResponse(path, media_type="application/rss+xml")
 
 
-# --- minimal UI ------------------------------------------------------------
+# --- UI helpers ------------------------------------------------------------
 
 def _options(items: list[tuple[str, str]], selected: str) -> str:
     return "".join(
-        f'<option value="{v}"{" selected" if v == selected else ""}>{label}</option>'
+        f'<option value="{v}"{" selected" if v == selected else ""}>{html.escape(label)}</option>'
         for v, label in items
     )
 
 
-# Stepper visualisation for the topic pipeline. Filled = done/in-progress,
-# empty = not yet. The "current" stage is the rightmost filled segment.
+# Stepper visualisation for the topic pipeline.
 _PROGRESS = {
     TopicStatus.QUEUED:           ("queued",                "▱▱▱▱"),
     TopicStatus.RESEARCHING:      ("researching",            "▰▱▱▱"),
@@ -155,107 +178,522 @@ _PROGRESS = {
 _IN_FLIGHT = {TopicStatus.RESEARCHING, TopicStatus.SCRIPTING, TopicStatus.GENERATING_AUDIO}
 
 
+def _fmt_duration(seconds: int) -> str:
+    if not seconds:
+        return ""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
+
+def _star_display(rating: float | None) -> str:
+    if rating is None:
+        return '<span class="rating-empty">★★★★★</span>'
+    filled = int(round(rating))
+    return f'<span class="rating-filled">{"★" * filled}</span><span class="rating-empty">{"★" * (5 - filled)}</span>'
+
+
+def _filter_and_sort(eps: list[Episode], tag: str, sort: str) -> list[Episode]:
+    if tag:
+        tag_lower = tag.lower()
+        eps = [e for e in eps if any(t.lower() == tag_lower for t in e.tags)]
+    if sort == "oldest":
+        eps = sorted(eps, key=lambda e: e.published_at)
+    elif sort == "rating":
+        eps = sorted(eps, key=lambda e: (e.rating or 0), reverse=True)
+    elif sort == "longest":
+        eps = sorted(eps, key=lambda e: e.duration_seconds, reverse=True)
+    elif sort == "shortest":
+        eps = sorted(eps, key=lambda e: e.duration_seconds)
+    # default newest is already DESC from get_episodes()
+    return eps
+
+
+# --- main page -------------------------------------------------------------
+
 @app.get("/", response_class=HTMLResponse)
-def home():
+def home(tag: str = "", sort: str = "newest"):
     all_topics = get_topics()
     suggested = [t for t in all_topics if t.status == TopicStatus.SUGGESTED]
     queued = [t for t in all_topics if t.status in (
         TopicStatus.QUEUED, TopicStatus.RESEARCHING, TopicStatus.SCRIPTING,
         TopicStatus.GENERATING_AUDIO, TopicStatus.FAILED)]
-    episodes = get_episodes()
+    all_episodes = get_episodes()
+    episodes = _filter_and_sort(all_episodes, tag, sort)
     any_in_flight = any(t.status in _IN_FLIGHT for t in all_topics)
+    all_tags = sorted({t for e in all_episodes for t in e.tags}, key=str.lower)
 
+    # --- settings dropdowns ---
     style_opts = _options(
         [(k, v["label"]) for k, v in STYLE_PRESETS.items()],
         get_setting("style_preset", "dry_british"),
     )
     voice_a_opts = _options(KOKORO_VOICES, get_setting("voice_a", "bm_george"))
     voice_b_opts = _options(KOKORO_VOICES, get_setting("voice_b", "bf_emma"))
+    length_opts = _options(
+        [("2", "2 min — espresso shot"), ("5", "5 min — flat white"), ("10", "10 min — long black")],
+        get_setting("target_minutes", "5"),
+    )
 
+    # --- topic rendering ---
     def topic_row(t: Topic, actions: str | None = None) -> str:
         label, bar = _PROGRESS.get(t.status, (t.status.value, ""))
-        progress = f' <span class="bar">{bar}</span>' if bar else ""
-        note = f"<br><small>{t.notes}</small>" if t.notes else ""
-        err = (
-            f'<br><small style="color:#a00"><b>Error:</b> {t.last_error}</small>'
+        progress = f'<span class="bar">{bar}</span>' if bar else ""
+        status_cls = (
+            "ok" if t.status == TopicStatus.PUBLISHED
+            else "warn" if t.status in _IN_FLIGHT or t.status == TopicStatus.QUEUED
+            else "danger" if t.status == TopicStatus.FAILED
+            else "muted"
+        )
+        note_html = f'<div class="note">{html.escape(t.notes)}</div>' if t.notes else ""
+        err_html = (
+            f'<div class="err"><b>Error:</b> {html.escape(t.last_error)}</div>'
             if t.status == TopicStatus.FAILED and t.last_error else ""
         )
-        note = note + err
         if actions is None:
             if t.status == TopicStatus.QUEUED:
                 actions = (
-                    f'<form style="display:inline" method="post" action="/topics/{t.id}/produce">'
-                    f'<button>Produce now</button></form>'
+                    f'<form method="post" action="/topics/{t.id}/produce">'
+                    f'<button class="btn-primary">Produce now</button></form>'
                 )
             elif t.status == TopicStatus.FAILED:
                 actions = (
-                    f'<form style="display:inline" method="post" action="/topics/{t.id}/produce">'
-                    f'<button>Retry</button></form>'
+                    f'<form method="post" action="/topics/{t.id}/produce">'
+                    f'<button class="btn-primary">Retry</button></form>'
                 )
             else:
                 actions = ""
-        return f'<li><b>{t.title}</b> <em>({label}{progress})</em>{note} {actions}</li>'
+        return (
+            f'<article class="card topic">'
+            f'<div class="topic-head">'
+            f'<h3>{html.escape(t.title)}</h3>'
+            f'<span class="status status-{status_cls}">{html.escape(label)} {progress}</span>'
+            f'</div>'
+            f'{note_html}{err_html}'
+            f'<div class="topic-actions">{actions}</div>'
+            f'</article>'
+        )
 
     sug_html = "".join(
         topic_row(
             t,
-            f'<form style="display:inline" method="post" action="/topics/{t.id}/approve">'
-            f'<button>Approve</button></form> '
-            f'<form style="display:inline" method="post" action="/topics/{t.id}/reject">'
-            f'<button>Reject</button></form>',
+            f'<form method="post" action="/topics/{t.id}/approve">'
+            f'<button class="btn-primary">Approve</button></form>'
+            f'<form method="post" action="/topics/{t.id}/reject">'
+            f'<button class="btn-ghost">Reject</button></form>',
         )
         for t in suggested
-    ) or "<li><em>No suggestions yet.</em></li>"
+    ) or '<p class="empty">No curated suggestions yet.</p>'
 
-    q_html = "".join(topic_row(t) for t in queued) or "<li><em>Queue empty.</em></li>"
+    q_html = "".join(topic_row(t) for t in queued) or '<p class="empty">Queue is empty — add a topic above.</p>'
 
-    ep_html = "".join(
-        f'<li><b>{e.title}</b> — {e.summary}<br>'
-        f'<audio controls src="/audio/{Path(e.audio_path).name}"></audio>'
-        f'<form style="display:inline;margin-left:.5rem" method="post" '
-        f'action="/episodes/{e.id}/rerender">'
-        f'<button title="Re-run the pipeline with current voice/style settings">'
-        f'Re-render</button></form></li>'
-        for e in episodes
-    ) or "<li><em>No episodes yet.</em></li>"
+    # --- episode rendering ---
+    def episode_card(e: Episode) -> str:
+        tags_html = "".join(
+            f'<a class="tag" href="/?tag={html.escape(t)}">{html.escape(t)}</a>'
+            for t in e.tags
+        ) or '<span class="tag tag-empty">untagged</span>'
+        backend_chip = (
+            f'<span class="chip">via {html.escape(e.audio_backend)}</span>'
+            if e.audio_backend else ""
+        )
+        duration_chip = (
+            f'<span class="chip">{_fmt_duration(e.duration_seconds)}</span>'
+            if e.duration_seconds else ""
+        )
+        audio_name = Path(e.audio_path).name
+        rating_val = "" if e.rating is None else f"{e.rating:.0f}"
+        return f"""
+        <article class="card episode">
+          <div class="ep-head">
+            <h3>{html.escape(e.title)}</h3>
+            <div class="ep-meta">{duration_chip}{backend_chip}</div>
+          </div>
+          <p class="summary">{html.escape(e.summary)}</p>
+          <audio controls preload="none" src="/audio/{html.escape(audio_name)}"></audio>
+          <div class="ep-tags">{tags_html}</div>
+          <div class="ep-rating">{_star_display(e.rating)}</div>
+          <details class="ep-edit">
+            <summary>Edit tags &amp; rating</summary>
+            <form method="post" action="/episodes/{e.id}/edit" class="edit-form">
+              <label>Tags (comma-separated)
+                <input name="tags" value="{html.escape(",".join(e.tags))}" placeholder="finance, tech, deep-dive">
+              </label>
+              <label>Rating
+                <select name="rating">
+                  <option value=""{"" if e.rating is not None else " selected"}>— unrated —</option>
+                  <option value="1"{" selected" if rating_val == "1" else ""}>★ — meh</option>
+                  <option value="2"{" selected" if rating_val == "2" else ""}>★★ — okay</option>
+                  <option value="3"{" selected" if rating_val == "3" else ""}>★★★ — good</option>
+                  <option value="4"{" selected" if rating_val == "4" else ""}>★★★★ — great</option>
+                  <option value="5"{" selected" if rating_val == "5" else ""}>★★★★★ — keeper</option>
+                </select>
+              </label>
+              <div class="form-actions">
+                <button class="btn-primary" type="submit">Save</button>
+                <form method="post" action="/episodes/{e.id}/rerender" style="display:inline">
+                  <button class="btn-ghost" type="submit">Re-render</button>
+                </form>
+              </div>
+            </form>
+          </details>
+        </article>
+        """
 
+    ep_html = "".join(episode_card(e) for e in episodes) or (
+        '<p class="empty">No episodes match those filters yet.</p>' if (tag or sort != "newest")
+        else '<p class="empty">No episodes yet — queue a topic and click <b>Produce now</b>.</p>'
+    )
+
+    # --- filter bar ---
+    tag_opts = _options(
+        [("", "all tags")] + [(t, t) for t in all_tags],
+        tag,
+    )
+    sort_opts = _options(
+        [
+            ("newest", "newest first"),
+            ("oldest", "oldest first"),
+            ("rating", "top rated"),
+            ("longest", "longest"),
+            ("shortest", "shortest"),
+        ],
+        sort,
+    )
+
+    # --- banners ---
     refresh = '<meta http-equiv="refresh" content="5">' if any_in_flight else ''
     in_flight_banner = (
-        '<p style="background:#fff8d8;padding:.5rem .8rem;border-left:3px solid #d4a017;'
-        'border-radius:3px"><b>Episode in progress.</b> This page auto-refreshes every 5s '
-        'while work is running.</p>'
+        '<div class="banner banner-warn"><b>Episode in progress.</b> This page '
+        'auto-refreshes every 5s while work is running.</div>'
         if any_in_flight else ''
     )
 
-    return f"""<!doctype html><html><head><meta charset="utf-8">
+    return f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 {refresh}
 <title>MorningCast</title>
-<style>body{{font-family:system-ui;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5}}
-h1{{margin-bottom:0}} ul{{padding-left:1rem}} li{{margin:.6rem 0}}
-button{{cursor:pointer}} input,textarea{{width:100%;padding:.4rem;margin:.2rem 0}}
-.bar{{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:1px;color:#0a7}}</style>
+<style>{_CSS}</style>
 </head><body>
-<h1>☕ MorningCast</h1>
-<p>Subscribe in your podcast app: <code>/feed.xml</code></p>
-{in_flight_banner}
+<header class="masthead">
+  <div class="masthead-inner">
+    <h1>☕ MorningCast</h1>
+    <p class="tagline">Concise, AI-curated morning podcasts.</p>
+  </div>
+</header>
 
-<h2>Add a topic</h2>
-<form method="post" action="/topics">
-  <input name="title" placeholder="Topic title" required>
-  <textarea name="notes" placeholder="Optional steer / angle"></textarea>
-  <button type="submit">Queue it</button>
-</form>
+<main class="container">
+  {in_flight_banner}
 
-<h2>Voice &amp; style</h2>
-<form method="post" action="/settings">
-  <label>Style: <select name="style_preset">{style_opts}</select></label>
-  <label>Host A ({settings.host_a_name}): <select name="voice_a">{voice_a_opts}</select></label>
-  <label>Host B ({settings.host_b_name}): <select name="voice_b">{voice_b_opts}</select></label>
-  <button type="submit">Save settings</button>
-  <small>Applies to the next episode you <em>produce</em>. Re-queue existing topics to re-render with new voices.</small>
-</form>
+  <section class="card section">
+    <h2>Add a topic</h2>
+    <form method="post" action="/topics" class="add-form">
+      <input name="title" placeholder="What should we cover next?" required>
+      <textarea name="notes" placeholder="Optional steer or angle (e.g. focus on Sydney market)"></textarea>
+      <button class="btn-primary" type="submit">Queue it</button>
+    </form>
+  </section>
 
-<h2>Curated suggestions</h2><ul>{sug_html}</ul>
-<h2>In progress / queued</h2><ul>{q_html}</ul>
-<h2>Episodes</h2><ul>{ep_html}</ul>
+  <section class="card section">
+    <h2>Brew settings</h2>
+    <form method="post" action="/settings" class="settings-form">
+      <label>Style
+        <select name="style_preset">{style_opts}</select>
+      </label>
+      <label>Length
+        <select name="target_minutes">{length_opts}</select>
+      </label>
+      <label>Host A &mdash; {html.escape(settings.host_a_name)}
+        <select name="voice_a">{voice_a_opts}</select>
+      </label>
+      <label>Host B &mdash; {html.escape(settings.host_b_name)}
+        <select name="voice_b">{voice_b_opts}</select>
+      </label>
+      <div class="form-actions">
+        <button class="btn-primary" type="submit">Save settings</button>
+        <small class="muted">Applies to the next episode you produce.</small>
+      </div>
+    </form>
+  </section>
+
+  {('<section class="section"><h2>Curated suggestions</h2>' + sug_html + '</section>') if suggested else ''}
+
+  <section class="section">
+    <h2>In progress &amp; queued</h2>
+    {q_html}
+  </section>
+
+  <section class="section">
+    <h2>Library</h2>
+    <form method="get" action="/" class="filter-bar">
+      <label>Tag
+        <select name="tag" onchange="this.form.submit()">{tag_opts}</select>
+      </label>
+      <label>Sort
+        <select name="sort" onchange="this.form.submit()">{sort_opts}</select>
+      </label>
+      <noscript><button class="btn-ghost" type="submit">Apply</button></noscript>
+      {('<a class="btn-ghost" href="/">Clear</a>' if (tag or sort != "newest") else '')}
+    </form>
+    <div class="episodes">{ep_html}</div>
+  </section>
+
+  <footer class="footer">
+    <p>Subscribe in your podcast app: <a href="/feed.xml"><code>/feed.xml</code></a></p>
+  </footer>
+</main>
 </body></html>"""
+
+
+_CSS = r"""
+:root {
+  --bg:        #fbf6ec;
+  --bg-card:   #ffffff;
+  --bg-accent: #f3e7d0;
+  --text:      #2d1810;
+  --text-mute: #7a5c44;
+  --accent:    #8b4513;
+  --accent-hi: #6b3410;
+  --highlight: #d4a574;
+  --ok:        #4a7c2a;
+  --warn:      #c47a1a;
+  --danger:    #b23a48;
+  --border:    rgba(45, 24, 16, 0.12);
+  --shadow:    0 1px 3px rgba(45, 24, 16, 0.08), 0 6px 16px rgba(45, 24, 16, 0.04);
+  --radius:    10px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hi); text-decoration: underline; }
+
+/* masthead */
+.masthead {
+  background: linear-gradient(135deg, #6b3410 0%, #8b4513 55%, #b86f2f 100%);
+  color: #fff8ec;
+  padding: 1.4rem 1rem 1.6rem;
+  box-shadow: 0 2px 8px rgba(45, 24, 16, 0.15);
+}
+.masthead-inner { max-width: 900px; margin: 0 auto; }
+.masthead h1 { margin: 0; font-size: 1.85rem; letter-spacing: -0.5px; }
+.tagline { margin: 0.25rem 0 0; opacity: 0.85; font-size: 1rem; }
+
+/* layout */
+.container { max-width: 900px; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+.section { margin-top: 2rem; }
+.section h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.8rem;
+  letter-spacing: 0.2px;
+  color: var(--accent-hi);
+}
+.empty {
+  color: var(--text-mute);
+  font-style: italic;
+  padding: 0.6rem 0;
+}
+.muted { color: var(--text-mute); }
+
+/* cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.2rem;
+  margin-bottom: 1rem;
+}
+
+/* banners */
+.banner {
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius);
+  border-left: 4px solid var(--warn);
+  background: #fff5e0;
+  margin-bottom: 1rem;
+}
+.banner-warn { border-left-color: var(--warn); }
+
+/* forms */
+form label {
+  display: block;
+  margin: 0.55rem 0;
+  font-size: 0.93rem;
+  color: var(--text-mute);
+}
+input[type=text], input:not([type]), textarea, select {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  color: var(--text);
+  margin-top: 0.2rem;
+}
+textarea { min-height: 70px; resize: vertical; }
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid var(--highlight);
+  outline-offset: 1px;
+}
+
+/* buttons */
+button, .btn-primary, .btn-ghost {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid transparent;
+  transition: background 120ms ease, transform 80ms ease;
+  min-height: 44px; /* mobile touch target */
+}
+.btn-primary, button[type=submit] {
+  background: var(--accent);
+  color: #fff8ec;
+  border-color: var(--accent);
+}
+.btn-primary:hover, button[type=submit]:hover { background: var(--accent-hi); }
+.btn-ghost {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--border);
+  text-decoration: none;
+  display: inline-block;
+}
+.btn-ghost:hover { background: var(--bg-accent); color: var(--accent-hi); text-decoration: none; }
+
+.form-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+/* settings form: two-column on wide screens */
+.settings-form { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem 1rem; }
+.settings-form .form-actions { grid-column: 1 / -1; }
+@media (max-width: 600px) {
+  .settings-form { grid-template-columns: 1fr; }
+}
+
+/* topic cards */
+.topic .topic-head {
+  display: flex; gap: 0.75rem; align-items: baseline;
+  justify-content: space-between; flex-wrap: wrap;
+}
+.topic h3 { margin: 0; font-size: 1.05rem; }
+.topic .note { margin-top: 0.35rem; color: var(--text-mute); font-size: 0.92rem; }
+.topic .err  { margin-top: 0.4rem; color: var(--danger); font-size: 0.88rem; }
+.topic-actions { margin-top: 0.7rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.topic-actions form { margin: 0; }
+
+.status {
+  font-size: 0.8rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.status-ok     { background: #e7f3df; color: var(--ok); }
+.status-warn   { background: #fbeacf; color: var(--warn); }
+.status-danger { background: #f6dadf; color: var(--danger); }
+.status-muted  { background: var(--bg-accent); color: var(--text-mute); }
+.bar {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  letter-spacing: 1px;
+  margin-left: 0.4rem;
+}
+
+/* episode cards */
+.episodes { display: flex; flex-direction: column; gap: 0.6rem; }
+.episode .ep-head {
+  display: flex; gap: 0.75rem; align-items: baseline;
+  justify-content: space-between; flex-wrap: wrap;
+}
+.episode h3 { margin: 0; font-size: 1.1rem; line-height: 1.3; }
+.episode .summary { margin: 0.35rem 0 0.75rem; color: var(--text-mute); font-size: 0.95rem; }
+.episode audio { width: 100%; margin: 0.4rem 0 0.6rem; }
+.ep-meta { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.chip {
+  background: var(--bg-accent);
+  color: var(--accent-hi);
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.ep-tags {
+  display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.4rem;
+}
+.tag {
+  background: var(--bg-accent);
+  color: var(--accent-hi);
+  padding: 0.18rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+}
+.tag:hover { background: var(--highlight); color: var(--text); text-decoration: none; }
+.tag-empty { background: transparent; color: var(--text-mute); border-color: var(--border); font-style: italic; }
+
+.ep-rating { font-size: 1rem; margin-bottom: 0.5rem; letter-spacing: 1px; }
+.rating-filled { color: var(--highlight); }
+.rating-empty  { color: rgba(45, 24, 16, 0.18); }
+
+.ep-edit {
+  border-top: 1px dashed var(--border);
+  padding-top: 0.7rem;
+  margin-top: 0.4rem;
+}
+.ep-edit summary {
+  cursor: pointer;
+  color: var(--text-mute);
+  font-size: 0.88rem;
+  list-style: none;
+}
+.ep-edit summary::before { content: "▸ "; }
+.ep-edit[open] summary::before { content: "▾ "; }
+.edit-form { margin-top: 0.6rem; }
+
+/* filter bar */
+.filter-bar {
+  display: flex; gap: 0.8rem; align-items: end; flex-wrap: wrap;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.7rem 1rem;
+  margin-bottom: 0.8rem;
+  box-shadow: var(--shadow);
+}
+.filter-bar label { margin: 0; flex: 1 1 160px; }
+.filter-bar .btn-ghost { align-self: end; }
+
+/* footer */
+.footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--border);
+  color: var(--text-mute);
+  text-align: center;
+  font-size: 0.88rem;
+}
+
+/* mobile tightening */
+@media (max-width: 600px) {
+  .masthead { padding: 1.1rem 0.9rem 1.3rem; }
+  .masthead h1 { font-size: 1.5rem; }
+  .container { padding: 1rem 0.7rem 3rem; }
+  .card { padding: 0.9rem 0.95rem; }
+  .episode h3 { font-size: 1rem; }
+}
+"""

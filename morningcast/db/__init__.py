@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     audio_path TEXT NOT NULL,
     duration_seconds INTEGER DEFAULT 0,
     rating REAL,
+    tags TEXT DEFAULT '',
+    audio_backend TEXT DEFAULT '',
     published_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -52,6 +54,7 @@ _SETTING_DEFAULTS = {
     "style_preset": "dry_british",
     "voice_a": "bm_george",
     "voice_b": "bf_emma",
+    "target_minutes": "5",
 }
 
 
@@ -68,6 +71,11 @@ def init_db(path: Path = DB_PATH) -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(topics)").fetchall()}
         if "last_error" not in cols:
             c.execute("ALTER TABLE topics ADD COLUMN last_error TEXT DEFAULT ''")
+        ep_cols = {r["name"] for r in c.execute("PRAGMA table_info(episodes)").fetchall()}
+        if "tags" not in ep_cols:
+            c.execute("ALTER TABLE episodes ADD COLUMN tags TEXT DEFAULT ''")
+        if "audio_backend" not in ep_cols:
+            c.execute("ALTER TABLE episodes ADD COLUMN audio_backend TEXT DEFAULT ''")
         for k, v in _SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?,?)", (k, v))
 
@@ -144,20 +152,48 @@ def _row_to_topic(r: sqlite3.Row) -> Topic:
 # --- episodes --------------------------------------------------------------
 
 def save_episode(ep: Episode) -> Episode:
+    tags_csv = ",".join(t.strip() for t in ep.tags if t.strip())
     with _conn() as c:
         c.execute(
             """INSERT INTO episodes
-               (id, topic_id, title, summary, audio_path, duration_seconds, rating, published_at)
-               VALUES (?,?,?,?,?,?,?,?)
+               (id, topic_id, title, summary, audio_path, duration_seconds, rating,
+                tags, audio_backend, published_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, summary=excluded.summary, audio_path=excluded.audio_path,
-                 duration_seconds=excluded.duration_seconds, rating=excluded.rating""",
+                 duration_seconds=excluded.duration_seconds, rating=excluded.rating,
+                 tags=excluded.tags, audio_backend=excluded.audio_backend""",
             (
                 ep.id, ep.topic_id, ep.title, ep.summary, ep.audio_path,
-                ep.duration_seconds, ep.rating, ep.published_at.isoformat(),
+                ep.duration_seconds, ep.rating, tags_csv, ep.audio_backend,
+                ep.published_at.isoformat(),
             ),
         )
     return ep
+
+
+def _parse_tags(csv: str | None) -> list[str]:
+    if not csv:
+        return []
+    return [t.strip() for t in csv.split(",") if t.strip()]
+
+
+def get_episode(episode_id: str) -> Episode | None:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not r:
+        return None
+    return _row_to_episode(r)
+
+
+def update_episode_meta(episode_id: str, tags: list[str], rating: float | None) -> None:
+    """Update only the user-editable metadata for an episode (tags, rating)."""
+    tags_csv = ",".join(t.strip() for t in tags if t.strip())
+    with _conn() as c:
+        c.execute(
+            "UPDATE episodes SET tags=?, rating=? WHERE id=?",
+            (tags_csv, rating, episode_id),
+        )
 
 
 def delete_episodes_for_topic(topic_id: str) -> None:
@@ -165,14 +201,25 @@ def delete_episodes_for_topic(topic_id: str) -> None:
         c.execute("DELETE FROM episodes WHERE topic_id=?", (topic_id,))
 
 
+def _row_to_episode(r: sqlite3.Row) -> Episode:
+    # Tolerate older DBs that don't yet have the tags / audio_backend columns.
+    try:
+        tags = _parse_tags(r["tags"])
+    except (IndexError, KeyError):
+        tags = []
+    try:
+        audio_backend = r["audio_backend"] or ""
+    except (IndexError, KeyError):
+        audio_backend = ""
+    return Episode(
+        id=r["id"], topic_id=r["topic_id"], title=r["title"], summary=r["summary"],
+        audio_path=r["audio_path"], duration_seconds=r["duration_seconds"],
+        rating=r["rating"], tags=tags, audio_backend=audio_backend,
+        published_at=datetime.fromisoformat(r["published_at"]),
+    )
+
+
 def get_episodes() -> list[Episode]:
     with _conn() as c:
         rows = c.execute("SELECT * FROM episodes ORDER BY published_at DESC").fetchall()
-    return [
-        Episode(
-            id=r["id"], topic_id=r["topic_id"], title=r["title"], summary=r["summary"],
-            audio_path=r["audio_path"], duration_seconds=r["duration_seconds"],
-            rating=r["rating"], published_at=datetime.fromisoformat(r["published_at"]),
-        )
-        for r in rows
-    ]
+    return [_row_to_episode(r) for r in rows]

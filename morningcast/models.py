@@ -80,6 +80,8 @@ class Episode:
     summary: str
     audio_path: str            # local path to mp3
     duration_seconds: int = 0
-    rating: float | None = None   # for the future shared-library feature
+    rating: float | None = None   # 1-5, user-set after listening
+    tags: list[str] = field(default_factory=list)  # free-form, comma-edited in UI
+    audio_backend: str = ""    # kokoro / dia2 / stub / elevenlabs — set at render time
     id: str = field(default_factory=_new_id)
     published_at: datetime = field(default_factory=_now)
