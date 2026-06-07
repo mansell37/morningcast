@@ -136,11 +136,18 @@ don't want to wait.
   `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Leaving it
   empty disables PC builds entirely.
 
-**On the PC** (the machine with the GPU):
+**On the PC** (the machine with the GPU). Use **Python 3.12** — the worker only
+needs the Dia2 audio stack, *not* the full app, and 3.12 has prebuilt wheels for
+everything (on 3.13, `kokoro`'s deps force a from-source NumPy build that needs a
+C++ compiler). Install just the worker deps via `requirements-worker.txt`:
 
 ```bash
-pip install -r requirements.txt
-pip install "dia @ git+https://github.com/nari-labs/dia.git"   # + a CUDA torch
+py -3.12 -m venv .venv && .venv\Scripts\activate     # Windows
+# python3.12 -m venv .venv && source .venv/bin/activate   # macOS/Linux
+
+# CUDA-enabled torch FIRST (pick your CUDA build at pytorch.org), e.g.:
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-worker.txt
 
 # point the worker at your hosted app and run it (leave it running):
 MC_BASE_URL=https://<your-app>.up.railway.app \
