@@ -11,7 +11,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import DB_PATH
-from ..models import Episode, Topic, TopicSource, TopicStatus
+from ..models import (
+    BuildTarget,
+    Episode,
+    Script,
+    ScriptLine,
+    Topic,
+    TopicSource,
+    TopicStatus,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS topics (
@@ -21,6 +29,7 @@ CREATE TABLE IF NOT EXISTS topics (
     status TEXT NOT NULL,
     notes TEXT DEFAULT '',
     last_error TEXT DEFAULT '',
+    build_target TEXT DEFAULT 'cloud',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -29,6 +38,14 @@ CREATE TABLE IF NOT EXISTS briefings (
     topic_id TEXT NOT NULL,
     markdown TEXT NOT NULL,
     sources TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scripts (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    lines TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS episodes (
@@ -71,6 +88,8 @@ def init_db(path: Path = DB_PATH) -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(topics)").fetchall()}
         if "last_error" not in cols:
             c.execute("ALTER TABLE topics ADD COLUMN last_error TEXT DEFAULT ''")
+        if "build_target" not in cols:
+            c.execute("ALTER TABLE topics ADD COLUMN build_target TEXT DEFAULT 'cloud'")
         ep_cols = {r["name"] for r in c.execute("PRAGMA table_info(episodes)").fetchall()}
         if "tags" not in ep_cols:
             c.execute("ALTER TABLE episodes ADD COLUMN tags TEXT DEFAULT ''")
@@ -103,14 +122,17 @@ def save_topic(topic: Topic) -> Topic:
     topic.updated_at = datetime.now(timezone.utc)
     with _conn() as c:
         c.execute(
-            """INSERT INTO topics (id, title, source, status, notes, last_error, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)
+            """INSERT INTO topics
+                 (id, title, source, status, notes, last_error, build_target, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, source=excluded.source, status=excluded.status,
-                 notes=excluded.notes, last_error=excluded.last_error, updated_at=excluded.updated_at""",
+                 notes=excluded.notes, last_error=excluded.last_error,
+                 build_target=excluded.build_target, updated_at=excluded.updated_at""",
             (
                 topic.id, topic.title, topic.source.value, topic.status.value,
-                topic.notes, topic.last_error, topic.created_at.isoformat(), topic.updated_at.isoformat(),
+                topic.notes, topic.last_error, topic.build_target.value,
+                topic.created_at.isoformat(), topic.updated_at.isoformat(),
             ),
         )
     return topic
@@ -141,11 +163,51 @@ def _row_to_topic(r: sqlite3.Row) -> Topic:
         last_error = r["last_error"] or ""
     except (IndexError, KeyError):
         last_error = ""
+    try:
+        build_target = BuildTarget(r["build_target"] or "cloud")
+    except (IndexError, KeyError, ValueError):
+        build_target = BuildTarget.CLOUD
     return Topic(
         id=r["id"], title=r["title"], source=TopicSource(r["source"]),
         status=TopicStatus(r["status"]), notes=r["notes"], last_error=last_error,
+        build_target=build_target,
         created_at=datetime.fromisoformat(r["created_at"]),
         updated_at=datetime.fromisoformat(r["updated_at"]),
+    )
+
+
+# --- scripts ---------------------------------------------------------------
+# Scripts are persisted only so a parked (build-on-PC) topic can be handed to
+# the local worker later. The cloud writes it; the worker reads it back.
+
+def save_script(script: Script) -> Script:
+    lines_json = json.dumps([{"speaker": l.speaker, "text": l.text} for l in script.lines])
+    with _conn() as c:
+        c.execute(
+            """INSERT INTO scripts (id, topic_id, title, summary, lines, created_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                 title=excluded.title, summary=excluded.summary, lines=excluded.lines""",
+            (
+                script.id, script.topic_id, script.title, script.summary,
+                lines_json, script.created_at.isoformat(),
+            ),
+        )
+    return script
+
+
+def get_latest_script(topic_id: str) -> Script | None:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT * FROM scripts WHERE topic_id=? ORDER BY created_at DESC LIMIT 1",
+            (topic_id,),
+        ).fetchone()
+    if not r:
+        return None
+    lines = [ScriptLine(speaker=d["speaker"], text=d["text"]) for d in json.loads(r["lines"])]
+    return Script(
+        id=r["id"], topic_id=r["topic_id"], title=r["title"], summary=r["summary"],
+        lines=lines, created_at=datetime.fromisoformat(r["created_at"]),
     )
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Form
+from fastapi import BackgroundTasks, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..audio import KOKORO_VOICES
@@ -22,6 +22,7 @@ from ..db import (
     delete_episodes_for_topic,
     get_episode,
     get_episodes,
+    get_latest_script,
     get_setting,
     get_topic,
     get_topics,
@@ -31,7 +32,7 @@ from ..db import (
     update_episode_meta,
 )
 from ..feed import build_feed
-from ..models import Episode, Topic, TopicSource, TopicStatus
+from ..models import BuildTarget, Episode, Topic, TopicSource, TopicStatus
 from ..script import STYLE_PRESETS
 
 app = FastAPI(title="CoffeeCast")
@@ -45,9 +46,10 @@ def _startup() -> None:
 # --- API / actions ---------------------------------------------------------
 
 @app.post("/topics")
-def add_topic(title: str = Form(...), notes: str = Form("")):
+def add_topic(title: str = Form(...), notes: str = Form(""), build_target: str = Form("cloud")):
+    target = BuildTarget.PC if build_target == "pc" else BuildTarget.CLOUD
     save_topic(Topic(title=title, notes=notes, source=TopicSource.USER,
-                     status=TopicStatus.QUEUED))
+                     status=TopicStatus.QUEUED, build_target=target))
     return RedirectResponse("/", status_code=303)
 
 
@@ -80,6 +82,28 @@ def produce(topic_id: str, background: BackgroundTasks):
     t.status = TopicStatus.QUEUED
     save_topic(t)
     background.add_task(produce_episode, t)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/topics/{topic_id}/build-cloud")
+def build_cloud(topic_id: str, background: BackgroundTasks):
+    """Escape hatch: render a parked (build-on-PC) topic on the cloud instead.
+
+    Reuses the already-written script if we have it (no second research/script
+    spend); otherwise falls back to a full re-run.
+    """
+    from ..pipeline import produce_episode, render_and_publish
+
+    t = get_topic(topic_id)
+    if not t or t.status not in (TopicStatus.AWAITING_WORKER, TopicStatus.FAILED):
+        return RedirectResponse("/", status_code=303)
+    t.build_target = BuildTarget.CLOUD
+    save_topic(t)
+    script = get_latest_script(t.id)
+    if script:
+        background.add_task(render_and_publish, t, script, None)
+    else:
+        background.add_task(produce_episode, t)
     return RedirectResponse("/", status_code=303)
 
 
@@ -175,6 +199,102 @@ def feed():
     return FileResponse(path, media_type="application/rss+xml")
 
 
+# --- local GPU worker API --------------------------------------------------
+# A worker on the user's PC (`python -m morningcast.worker`) claims parked
+# build-on-PC jobs, renders them with Dia2 on the GPU, and uploads the mp3.
+# All endpoints require the shared MC_WORKER_TOKEN.
+
+def _require_worker(token: str | None) -> None:
+    if not settings.worker_token:
+        raise HTTPException(status_code=503, detail="Worker endpoints are disabled (set MC_WORKER_TOKEN).")
+    if token != settings.worker_token:
+        raise HTTPException(status_code=401, detail="Bad or missing worker token.")
+
+
+@app.post("/api/worker/claim")
+def worker_claim(x_worker_token: str | None = Header(default=None)):
+    """Hand the oldest parked job to the worker and mark it as rendering.
+
+    Flipping it to GENERATING_AUDIO stops a second claim from grabbing the same
+    job. If the PC dies mid-render the topic stays in that state; the user can
+    fall back to a cloud build from the UI.
+    """
+    _require_worker(x_worker_token)
+    parked = get_topics(status=TopicStatus.AWAITING_WORKER)
+    if not parked:
+        return {"job": None}
+    topic = parked[-1]  # get_topics is newest-first, so [-1] is the oldest waiting
+    script = get_latest_script(topic.id)
+    if not script:
+        # No script to render — kick it back so it doesn't wedge the queue.
+        topic.status = TopicStatus.FAILED
+        topic.last_error = "No stored script found for parked topic."
+        save_topic(topic)
+        return {"job": None}
+    topic.status = TopicStatus.GENERATING_AUDIO
+    save_topic(topic)
+    return {
+        "job": {
+            "topic_id": topic.id,
+            "title": script.title,
+            "summary": script.summary,
+            "lines": [{"speaker": l.speaker, "text": l.text} for l in script.lines],
+        }
+    }
+
+
+@app.post("/api/worker/result/{topic_id}")
+async def worker_result(
+    topic_id: str,
+    request: Request,
+    backend: str = "dia2",
+    x_worker_token: str | None = Header(default=None),
+):
+    """Receive a finished mp3 (raw audio/mpeg body) and publish the episode."""
+    _require_worker(x_worker_token)
+    topic = get_topic(topic_id)
+    script = get_latest_script(topic_id)
+    if not topic or not script:
+        raise HTTPException(status_code=404, detail="Unknown topic or missing script.")
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty audio body.")
+
+    from ..pipeline import render_and_publish
+
+    ep = render_and_publish(topic, script, _PrerenderedAudio(data, backend))
+    return {"ok": True, "episode_id": ep.id}
+
+
+@app.post("/api/worker/fail/{topic_id}")
+def worker_fail(
+    topic_id: str,
+    error: str = Form(""),
+    x_worker_token: str | None = Header(default=None),
+):
+    """Mark a parked job as failed so the UI can surface it / offer a retry."""
+    _require_worker(x_worker_token)
+    topic = get_topic(topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Unknown topic.")
+    topic.status = TopicStatus.FAILED
+    topic.last_error = (error or "Worker reported a render failure.")[:500]
+    save_topic(topic)
+    return {"ok": True}
+
+
+class _PrerenderedAudio:
+    """Adapter so render_and_publish can 'render' bytes the worker already made."""
+
+    def __init__(self, data: bytes, name: str):
+        self._data = data
+        self.name = name or "dia2"
+
+    def render(self, script, out_path: Path) -> Path:
+        out_path.write_bytes(self._data)
+        return out_path
+
+
 # --- UI helpers ------------------------------------------------------------
 
 def _options(items: list[tuple[str, str]], selected: str) -> str:
@@ -189,6 +309,7 @@ _PROGRESS = {
     TopicStatus.QUEUED:           ("queued",                "▱▱▱▱"),
     TopicStatus.RESEARCHING:      ("researching",            "▰▱▱▱"),
     TopicStatus.SCRIPTING:        ("scripting",             "▰▰▱▱"),
+    TopicStatus.AWAITING_WORKER:  ("waiting for your PC",    "▰▰▱▱"),
     TopicStatus.GENERATING_AUDIO: ("generating audio",       "▰▰▰▱"),
     TopicStatus.PUBLISHED:        ("published",              "▰▰▰▰"),
     TopicStatus.FAILED:           ("failed",                 "✕"),
@@ -196,6 +317,9 @@ _PROGRESS = {
     TopicStatus.SUGGESTED:        ("suggested",              ""),
 }
 _IN_FLIGHT = {TopicStatus.RESEARCHING, TopicStatus.SCRIPTING, TopicStatus.GENERATING_AUDIO}
+# Statuses that keep the page polling: actively-processing *plus* parked-for-PC,
+# so the page reloads itself the moment the worker publishes the episode.
+_ACTIVE = _IN_FLIGHT | {TopicStatus.AWAITING_WORKER}
 
 
 def _status_fingerprint(topics: list[Topic], episodes: list[Episode]) -> str:
@@ -214,7 +338,7 @@ def _status_fingerprint(topics: list[Topic], episodes: list[Episode]) -> str:
 def status_json():
     topics = get_topics()
     return {
-        "in_flight": any(t.status in _IN_FLIGHT for t in topics),
+        "in_flight": any(t.status in _ACTIVE for t in topics),
         "fingerprint": _status_fingerprint(topics, get_episodes()),
     }
 
@@ -257,10 +381,10 @@ def home(tag: str = "", sort: str = "newest"):
     suggested = [t for t in all_topics if t.status == TopicStatus.SUGGESTED]
     queued = [t for t in all_topics if t.status in (
         TopicStatus.QUEUED, TopicStatus.RESEARCHING, TopicStatus.SCRIPTING,
-        TopicStatus.GENERATING_AUDIO, TopicStatus.FAILED)]
+        TopicStatus.AWAITING_WORKER, TopicStatus.GENERATING_AUDIO, TopicStatus.FAILED)]
     all_episodes = get_episodes()
     episodes = _filter_and_sort(all_episodes, tag, sort)
-    any_in_flight = any(t.status in _IN_FLIGHT for t in all_topics)
+    any_in_flight = any(t.status in _ACTIVE for t in all_topics)
     all_tags = sorted({t for e in all_episodes for t in e.tags}, key=str.lower)
 
     # --- settings dropdowns ---
@@ -281,10 +405,18 @@ def home(tag: str = "", sort: str = "newest"):
         progress = f'<span class="bar">{bar}</span>' if bar else ""
         status_cls = (
             "ok" if t.status == TopicStatus.PUBLISHED
-            else "warn" if t.status in _IN_FLIGHT or t.status == TopicStatus.QUEUED
+            else "warn" if t.status in _ACTIVE or t.status == TopicStatus.QUEUED
             else "danger" if t.status == TopicStatus.FAILED
             else "muted"
         )
+        # Show where a not-yet-published topic will (or did) render.
+        target_chip = ""
+        if t.status not in (TopicStatus.PUBLISHED, TopicStatus.REJECTED):
+            target_chip = (
+                '<span class="chip chip-pc">🖥 your PC · Dia2</span>'
+                if t.build_target == BuildTarget.PC
+                else '<span class="chip">☁ cloud · Kokoro</span>'
+            )
         note_html = f'<div class="note">{html.escape(t.notes)}</div>' if t.notes else ""
         err_html = (
             f'<div class="err"><b>Error:</b> {html.escape(t.last_error)}</div>'
@@ -295,6 +427,12 @@ def home(tag: str = "", sort: str = "newest"):
                 actions = (
                     f'<form method="post" action="/topics/{t.id}/produce">'
                     f'<button class="btn-primary">Produce now</button></form>'
+                )
+            elif t.status == TopicStatus.AWAITING_WORKER:
+                # Parked for the PC: offer a cloud fallback if it's not coming online.
+                actions = (
+                    f'<form method="post" action="/topics/{t.id}/build-cloud">'
+                    f'<button class="btn-ghost">Build on cloud instead</button></form>'
                 )
             elif t.status == TopicStatus.FAILED:
                 actions = (
@@ -309,6 +447,7 @@ def home(tag: str = "", sort: str = "newest"):
             f'<h3>{html.escape(t.title)}</h3>'
             f'<span class="status status-{status_cls}">{html.escape(label)} {progress}</span>'
             f'</div>'
+            f'<div class="topic-target">{target_chip}</div>'
             f'{note_html}{err_html}'
             f'<div class="topic-actions">{actions}</div>'
             f'</article>'
@@ -448,6 +587,13 @@ def home(tag: str = "", sort: str = "newest"):
     <form method="post" action="/topics" class="add-form">
       <input name="title" placeholder="What should we cover next?" required>
       <textarea name="notes" placeholder="Optional steer or angle (e.g. focus on Sydney market)"></textarea>
+      <fieldset class="build-target">
+        <legend>Build with</legend>
+        <label><input type="radio" name="build_target" value="cloud" checked>
+          ☁ Cloud now <span class="hint">— Kokoro, builds straight away</span></label>
+        <label><input type="radio" name="build_target" value="pc">
+          🖥 My PC <span class="hint">— Dia2, waits for the PC to come online</span></label>
+      </fieldset>
       <button class="btn-primary" type="submit">Queue it</button>
     </form>
   </section>
@@ -716,6 +862,21 @@ button, .btn-primary, .btn-ghost {
   font-weight: 600;
   letter-spacing: 0.3px;
 }
+.chip-pc { background: #2e2a4d; color: #cfc6ff; }
+.topic-target { margin-top: 0.4rem; }
+
+.build-target {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.25rem 0 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.build-target legend { font-size: 0.8rem; color: var(--text-mute); padding: 0 0.35rem; }
+.build-target label { display: flex; align-items: baseline; gap: 0.45rem; cursor: pointer; }
+.build-target .hint { color: var(--text-mute); font-size: 0.82rem; }
 
 .ep-tags {
   display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.4rem;

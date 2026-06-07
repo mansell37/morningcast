@@ -46,6 +46,12 @@ class Settings:
     audio_backend: str = os.getenv("MC_AUDIO_BACKEND", "kokoro")
     elevenlabs_api_key: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
 
+    # --- local GPU worker (build-on-PC / Dia2) ---
+    # Shared secret the local worker presents to claim jobs and upload audio.
+    # Must match on both the server and the PC running `python -m morningcast.worker`.
+    # Empty = the worker endpoints are disabled (no PC builds accepted).
+    worker_token: str = field(default_factory=lambda: os.getenv("MC_WORKER_TOKEN", ""))
+
     # --- podcast feed metadata ---
     feed_title: str = os.getenv("MC_FEED_TITLE", "CoffeeCast")
     feed_author: str = os.getenv("MC_FEED_AUTHOR", "CoffeeCast")

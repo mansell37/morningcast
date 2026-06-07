@@ -21,7 +21,12 @@ kokoro>=0.7.0
 
 # --- audio (optional backends, not required) ---
 # elevenlabs>=1.0.0     # uncomment to use the paid ElevenLabs backend
-# (Dia2: install from Nari Labs repo per DECISIONS.md; needs a GPU)
+#
+# Dia2 (build-on-PC backend): GPU-only, so it is NOT installed on the server.
+# On the PC that runs `python -m morningcast.worker`, install it alongside a
+# CUDA-enabled torch:
+#   pip install "dia @ git+https://github.com/nari-labs/dia.git"
+# The worker uses only the standard library for HTTP, so nothing else is needed.
 
 # --- dev ---
 pytest>=8.0.0
