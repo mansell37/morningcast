@@ -120,7 +120,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not settings.worker_token:
         raise SystemExit("MC_WORKER_TOKEN is not set — the server would reject this worker.")
-    log.info("CoffeeCast worker up. Server=%s, polling every %ss.", settings.base_url, POLL_SECONDS)
+    tok = settings.worker_token
+    masked = f"{tok[:4]}…{tok[-4:]}" if len(tok) >= 8 else "(too short)"
+    log.info(
+        "CoffeeCast worker up. Server=%s, token=%s (len %d), polling every %ss.",
+        settings.base_url, masked, len(tok), POLL_SECONDS,
+    )
 
     backoff = POLL_SECONDS
     while True:
