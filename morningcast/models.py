@@ -20,6 +20,7 @@ class TopicStatus(str, enum.Enum):
     QUEUED = "queued"           # approved / user-entered, ready to produce
     RESEARCHING = "researching"
     SCRIPTING = "scripting"
+    AWAITING_WORKER = "awaiting_worker"  # script ready, parked for the local PC (Dia2)
     GENERATING_AUDIO = "generating_audio"
     PUBLISHED = "published"
     FAILED = "failed"
@@ -31,6 +32,17 @@ class TopicSource(str, enum.Enum):
     CURATED = "curated"
 
 
+class BuildTarget(str, enum.Enum):
+    """Where the GPU-heavy audio render runs.
+
+    CLOUD  — render immediately on the always-on server (Kokoro, CPU).
+    PC     — park after scripting and let the local GPU worker render it with
+             Dia2 whenever the PC next comes online.
+    """
+    CLOUD = "cloud"
+    PC = "pc"
+
+
 @dataclass
 class Topic:
     title: str
@@ -38,6 +50,7 @@ class Topic:
     status: TopicStatus = TopicStatus.QUEUED
     notes: str = ""                       # optional user steer / curation rationale
     last_error: str = ""                  # set when status == FAILED, surfaced in UI
+    build_target: BuildTarget = BuildTarget.CLOUD  # cloud (Kokoro now) vs PC (Dia2 later)
     id: str = field(default_factory=_new_id)
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)

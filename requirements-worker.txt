@@ -1,0 +1,25 @@
+# Minimal dependencies for the local Dia2 GPU worker:
+#   python -m morningcast.worker
+#
+# This is NOT the full app. The worker only renders audio + uploads it, so it
+# deliberately leaves out the server/cloud stack (fastapi, uvicorn, kokoro,
+# anthropic, openai, ...). In particular it avoids `kokoro`, whose `misaki`
+# dependency pins numpy<2 and forces a from-source numpy build on Python 3.13.
+#
+# Use a Python 3.12 environment — the ML wheels (numpy 2.x, torch) are most
+# reliable there, so nothing has to compile.
+#
+# Install order on the PC:
+#   1) A CUDA-enabled PyTorch FIRST (pick the right CUDA build for your GPU at
+#      https://pytorch.org/get-started/locally/), e.g. for CUDA 12.4:
+#        pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   2) pip install -r requirements-worker.txt
+
+soundfile>=0.12.1
+imageio-ffmpeg>=0.5.0
+
+# Dia2 model (Nari Labs). The repo's distribution is actually named `nari-tts`
+# (the import module is `dia`), so install it by bare git URL — a `dia @ ...`
+# prefix makes pip reject it for an "inconsistent name". Pulls torch if you
+# didn't install it first (CPU build — slow), so install CUDA torch first.
+git+https://github.com/nari-labs/dia.git
