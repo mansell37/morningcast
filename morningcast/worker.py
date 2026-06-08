@@ -8,7 +8,7 @@ up jobs the moment they appear.
 
     # one-time, on the PC:
     pip install -r requirements.txt
-    pip install "dia @ git+https://github.com/nari-labs/dia.git"   # + a CUDA torch
+    pip install git+https://github.com/nari-labs/dia.git          # + a CUDA torch
 
     # then run the worker, pointed at your hosted app:
     MC_BASE_URL=https://<your-app>.up.railway.app \

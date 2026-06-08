@@ -18,6 +18,8 @@
 soundfile>=0.12.1
 imageio-ffmpeg>=0.5.0
 
-# Dia2 model (Nari Labs). Pulls torch if you didn't install it in step 1 above
-# (CPU build — slow), so install CUDA torch first for GPU rendering.
-dia @ git+https://github.com/nari-labs/dia.git
+# Dia2 model (Nari Labs). The repo's distribution is actually named `nari-tts`
+# (the import module is `dia`), so install it by bare git URL — a `dia @ ...`
+# prefix makes pip reject it for an "inconsistent name". Pulls torch if you
+# didn't install it first (CPU build — slow), so install CUDA torch first.
+git+https://github.com/nari-labs/dia.git

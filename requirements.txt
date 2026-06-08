@@ -25,7 +25,8 @@ kokoro>=0.7.0
 # Dia2 (build-on-PC backend): GPU-only, so it is NOT installed on the server.
 # On the PC that runs `python -m morningcast.worker`, install it alongside a
 # CUDA-enabled torch:
-#   pip install "dia @ git+https://github.com/nari-labs/dia.git"
+#   pip install git+https://github.com/nari-labs/dia.git
+# (the repo's distribution is named `nari-tts`; the import module is `dia`.)
 # The worker uses only the standard library for HTTP, so nothing else is needed.
 
 # --- dev ---
