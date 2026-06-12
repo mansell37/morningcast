@@ -273,6 +273,23 @@ def delete_episode(episode_id: str) -> str | None:
         return r["audio_path"]
 
 
+def delete_topic(topic_id: str) -> list[str]:
+    """Delete a topic and everything derived from it (episodes, scripts, briefings).
+
+    Returns any episode audio paths so the caller can unlink the mp3 files.
+    """
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT audio_path FROM episodes WHERE topic_id=?", (topic_id,)
+        ).fetchall()
+        audio_paths = [r["audio_path"] for r in rows]
+        c.execute("DELETE FROM episodes WHERE topic_id=?", (topic_id,))
+        c.execute("DELETE FROM scripts WHERE topic_id=?", (topic_id,))
+        c.execute("DELETE FROM briefings WHERE topic_id=?", (topic_id,))
+        c.execute("DELETE FROM topics WHERE id=?", (topic_id,))
+    return audio_paths
+
+
 def _row_to_episode(r: sqlite3.Row) -> Episode:
     # Tolerate older DBs that don't yet have the tags / audio_backend columns.
     try:
