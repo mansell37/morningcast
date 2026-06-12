@@ -20,6 +20,7 @@ from ..config import AUDIO_DIR, FEED_DIR, settings
 from ..db import (
     delete_episode,
     delete_episodes_for_topic,
+    delete_topic,
     get_episode,
     get_episodes,
     get_latest_script,
@@ -104,6 +105,25 @@ def build_cloud(topic_id: str, background: BackgroundTasks):
         background.add_task(render_and_publish, t, script, None)
     else:
         background.add_task(produce_episode, t)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/topics/{topic_id}/delete")
+def delete_topic_route(topic_id: str):
+    """Remove a topic from the queue entirely, along with anything derived from it.
+
+    Deletes the topic plus any script/briefing/episode it produced, and unlinks
+    the audio file if one exists. Note: a render already running in the
+    background can't be cancelled mid-flight — but the row won't come back.
+    """
+    audio_paths = delete_topic(topic_id)
+    for p in audio_paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass  # file gone or locked; the rows are already removed
+    if audio_paths:
+        build_feed()  # an episode was removed, so refresh the feed
     return RedirectResponse("/", status_code=303)
 
 
@@ -441,6 +461,14 @@ def home(tag: str = "", sort: str = "newest"):
                 )
             else:
                 actions = ""
+        # Every topic can be removed from the queue outright (deletes the topic
+        # and anything derived from it).
+        remove_form = (
+            f'<form method="post" action="/topics/{t.id}/delete" '
+            f'onsubmit="return confirm(\'Remove &quot;{html.escape(t.title)}&quot; '
+            f'from the queue? This deletes the topic for good.\');">'
+            f'<button class="btn-danger" type="submit">Remove</button></form>'
+        )
         return (
             f'<article class="card topic">'
             f'<div class="topic-head">'
@@ -449,7 +477,7 @@ def home(tag: str = "", sort: str = "newest"):
             f'</div>'
             f'<div class="topic-target">{target_chip}</div>'
             f'{note_html}{err_html}'
-            f'<div class="topic-actions">{actions}</div>'
+            f'<div class="topic-actions">{actions}{remove_form}</div>'
             f'</article>'
         )
 
@@ -492,6 +520,15 @@ def home(tag: str = "", sort: str = "newest"):
           <audio controls preload="none" src="/audio/{html.escape(audio_name)}"></audio>
           <div class="ep-tags">{tags_html}</div>
           <div class="ep-rating">{_star_display(e.rating)}</div>
+          <div class="ep-actions">
+            <form method="post" action="/episodes/{e.id}/rerender">
+              <button class="btn-ghost" type="submit">Re-render</button>
+            </form>
+            <form method="post" action="/episodes/{e.id}/delete"
+                  onsubmit="return confirm('Delete &quot;{html.escape(e.title)}&quot;? The mp3 will be removed too. The original topic stays so you can re-queue it later.');">
+              <button class="btn-danger" type="submit">Delete podcast</button>
+            </form>
+          </div>
           <details class="ep-edit">
             <summary>Edit tags &amp; rating</summary>
             <form method="post" action="/episodes/{e.id}/edit" class="edit-form">
@@ -512,15 +549,6 @@ def home(tag: str = "", sort: str = "newest"):
                 <button class="btn-primary" type="submit">Save</button>
               </div>
             </form>
-            <div class="edit-side-actions">
-              <form method="post" action="/episodes/{e.id}/rerender">
-                <button class="btn-ghost" type="submit">Re-render</button>
-              </form>
-              <form method="post" action="/episodes/{e.id}/delete"
-                    onsubmit="return confirm('Delete &quot;{html.escape(e.title)}&quot;? The mp3 will be removed too. The original topic stays so you can re-queue it later.');">
-                <button class="btn-danger" type="submit">Delete episode</button>
-              </form>
-            </div>
           </details>
         </article>
         """
@@ -910,15 +938,13 @@ button, .btn-primary, .btn-ghost {
 .ep-edit summary::before { content: "▸ "; }
 .ep-edit[open] summary::before { content: "▾ "; }
 .edit-form { margin-top: 0.6rem; }
-.edit-side-actions {
+.ep-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-  margin-top: 0.8rem;
-  padding-top: 0.7rem;
-  border-top: 1px dashed var(--border);
+  margin: 0.2rem 0 0.6rem;
 }
-.edit-side-actions form { margin: 0; }
+.ep-actions form { margin: 0; }
 
 /* filter bar */
 .filter-bar {
